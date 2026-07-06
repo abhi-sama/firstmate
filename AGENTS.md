@@ -52,6 +52,7 @@ This repo is a shared template, not the captain's personal project.
 The tracking principle: shared, tracked material is tracked under git; anything personal to this captain's fleet (.env, data/, state/, config/, projects/, .no-mistakes/) is not.
 Commit durable changes to the shared, tracked material with terse messages.
 This repo is itself behind the no-mistakes gate: ship shared, tracked material through the pipeline - branch, commit, run the pipeline, PR - and the captain's merge rule applies here exactly as it does to projects.
+A firstmate-repo PR gates on that no-mistakes validation, which runs shellcheck and tests before the PR; the fork's GitHub Actions CI re-runs the same checks and is therefore redundant, so such a PR is mergeable once no-mistakes is green and does not block on fork CI.
 Never add an agent name as co-author.
 
 ## 2. Layout and state
@@ -457,6 +458,8 @@ Then classify readiness:
 
 Keep dependency judgment coarse: same repo plus overlapping area means serialize; everything else runs parallel.
 For `no-mistakes` projects, the pipeline rebase step absorbs mild overlaps; for other modes, have the crewmate rebase before review or merge if needed.
+Batch related small changes into one ship task and one PR by default; fan out into separate parallel tasks only for genuinely independent work or a real speed need.
+Every ship task is a full no-mistakes run, so fragmenting related trivia multiplies the gate's token and time cost for no benefit; the no-concurrency-cap rule above is for parallelizing genuine independence, not a license to split related trivia.
 
 Write the brief per section 11.
 
@@ -550,6 +553,10 @@ The ship brief intentionally does not restate no-mistakes gate mechanics; it poi
 Firstmate's wrapper stays narrow: `ask-user` findings return through `needs-decision`, captain-owned decisions go back through `no-mistakes axi respond`, crewmate validation avoids `--yes`, and CI-green completion is reported as `done: PR {url} checks green`.
 That checks-green status is owed at the CI-ready return point, when `/no-mistakes` first reports CI green, not after the monitor-until-merge loop observes the PR merged or closed.
 Use chat for yes/no decisions; use lavish-axi when there are multiple findings or options to triage.
+
+Fit the gate to each repo rather than paying for work that proves nothing.
+If a repo has no real test suite, pin its no-mistakes test step to a fast deterministic no-op in the repo's own committed no-mistakes config (as ace-engine does with the no-op `pnpm test` in `.no-mistakes.yaml`), so the gate does not burn a freeform validation agent every PR; configure this per-repo and never have firstmate re-judge gate depth per change, which risks under-gating.
+Do not stack redundant gates: when the no-mistakes pipeline already ran the checks a later CI would re-run, that CI adds cost without assurance; for firstmate's own repo this is why a PR is mergeable once no-mistakes is green (section 1), while project PRs still honor their own CI.
 
 Judge a validating crewmate by the run's step status, never by whether its shell is still running.
 Read its current state with `bin/fm-crew-state.sh <id>`: a deterministic, token-tight one-line read that takes the matching no-mistakes run-step as the source of truth and reconciles it against the crewmate's `state/<id>.status` log.
