@@ -81,6 +81,7 @@ Natural language is acceptable if uncertain.
 | Exit command | `/exit` |
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
+| Resume | `claude --continue` resumes the most recent session in the current directory; `claude --resume <session-id>` resumes a specific session |
 
 First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
 After every spawn, peek the pane within about 20 seconds.
