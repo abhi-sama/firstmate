@@ -257,6 +257,10 @@ If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durab
 If this task produced durable project-intrinsic knowledge, record it in \`AGENTS.md\` as part of your change.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
+# Quality bar
+Your work here will be independently and adversarially reviewed before it ships - by no-mistakes' review gate when this project runs one, and by firstmate or the captain before merge either way.
+Hold your own work to that same bar and self-review before you report done.
+
 $DOD
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
