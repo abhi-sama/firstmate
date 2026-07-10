@@ -179,6 +179,24 @@ test_never_calls_respond_or_abort() {
   pass "a parked (ask-user) run is displayed without ever calling axi respond or axi abort"
 }
 
+test_cli_error_blob_is_graceful() {
+  local d; d=$(new_case cli-error)
+  make_repo "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-j.meta" "window=fm:fm-feat-j" "worktree=$d/wt" "kind=ship"
+  # no-mistakes prints its own errors to stdout, not stderr (e.g. when the
+  # repo is not yet registered); nm_bounded discards stderr/exit status, so
+  # this blob reaches monitor_tick indistinguishable from a real status block
+  # unless it is explicitly recognized.
+  FM_FAKE_AXI_STATUS="error: repo not initialized (run 'no-mistakes init' first)"
+  local out rc
+  out=$(run_tick "$d" feat-j); rc=$?
+  expect_code 0 "$rc" "a CLI error blob keeps polling, not terminal (exit 0)"
+  assert_contains "$out" "no active no-mistakes run yet" "a CLI error is shown as no active run, not displayed as a raw status block"
+  assert_not_contains "$out" "error: repo not initialized" "the raw CLI error text is not echoed forever as if it were a status block"
+  pass "a no-mistakes CLI error blob on stdout degrades gracefully instead of being displayed forever"
+}
+
 test_usage_errors() {
   local rc
   "$MONITOR" >/dev/null 2>&1; rc=$?
@@ -199,6 +217,7 @@ test_torn_down_missing_meta_is_graceful
 test_torn_down_worktree_is_graceful
 test_missing_no_mistakes_cli_is_graceful
 test_never_calls_respond_or_abort
+test_cli_error_blob_is_graceful
 test_usage_errors
 
 # --- real-tmux window management --------------------------------------------
@@ -221,8 +240,10 @@ if command -v tmux >/dev/null 2>&1; then
   TMUX_SHIM_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-pipeline-monitor-tmux.XXXXXX")
   FM_TEST_CLEANUP_DIRS+=("$TMUX_SHIM_DIR")
 
+  SOCKET2=""
   cleanup_tmux() {
     "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+    [ -z "$SOCKET2" ] || "$REAL_TMUX" -L "$SOCKET2" kill-server >/dev/null 2>&1 || true
     fm_test_cleanup
   }
   trap cleanup_tmux EXIT
@@ -244,6 +265,12 @@ SH
   PATH="$TMUX_ENV_PATH" FM_STATE_OVERRIDE="$D/state" \
     tmux new-session -d -s smoke -n fm-feat-g -x 200 -y 50 \
     || fail "real tmux: failed to start the private-socket session"
+  # Backstop for every spawned --loop below: never let a real monitor loop
+  # spin unbounded in this suite, regardless of what any individual test
+  # expects to happen. A genuinely active run (TICK_WAS_EMPTY=0, e.g. status:
+  # running) never counts toward this, so it does not interfere with the
+  # reuse test below, which deliberately keeps its window alive.
+  tmuxp set-environment FM_PIPELINE_MONITOR_MAX_EMPTY_TICKS 3
 
   test_opens_and_reuses_window() {
     fm_write_meta "$D/state/feat-g.meta" "window=smoke:fm-feat-g" "worktree=$D/wt" "kind=ship"
@@ -299,9 +326,87 @@ SH
     pass "real tmux: a task on a non-tmux backend no-ops with a pointer instead of touching tmux"
   }
 
+  # A SEPARATE private server, started WITHOUT FM_STATE_OVERRIDE or FM_HOME in
+  # its own start-time env, proves the spawned --loop process resolves the
+  # CALLING process's state dir via the new env-prefix forwarding fix - not
+  # by accident, the way the tests above could (their shared "smoke" server
+  # happens to have FM_STATE_OVERRIDE baked into its own start env already).
+  test_env_forwarding_reaches_spawned_pane() {
+    SOCKET2="fm-pipeline-monitor-noenv-$$"
+    local d2 fb2 shimdir2 pathnoenv
+    d2=$(new_case env-forward)
+    make_repo "$d2/wt"
+    fb2=$(make_fakebin "$d2")
+    shimdir2=$(mktemp -d "${TMPDIR:-/tmp}/fm-pipeline-monitor-tmux2.XXXXXX")
+    FM_TEST_CLEANUP_DIRS+=("$shimdir2")
+    cat > "$shimdir2/tmux" <<SH2
+#!/usr/bin/env bash
+exec "$REAL_TMUX" -L "$SOCKET2" "\$@"
+SH2
+    chmod +x "$shimdir2/tmux"
+    pathnoenv="$shimdir2:$fb2:$PATH"
+
+    env -u FM_STATE_OVERRIDE -u FM_HOME PATH="$pathnoenv" \
+      FM_PIPELINE_MONITOR_INTERVAL=1 FM_PIPELINE_MONITOR_MAX_EMPTY_TICKS=3 \
+      tmux new-session -d -s smoke2 -n fm-feat-k -x 200 -y 50 \
+      || fail "real tmux: failed to start the no-env private-socket session"
+
+    fm_write_meta "$d2/state/feat-k.meta" "window=smoke2:fm-feat-k" "worktree=$d2/wt" "kind=ship"
+    local out
+    out=$(PATH="$pathnoenv" FM_STATE_OVERRIDE="$d2/state" "$MONITOR" feat-k)
+    assert_contains "$out" "opened smoke2:fm-monitor-feat-k" "opens the monitor window in the no-env server"
+
+    local waited=0 pane=""
+    while :; do
+      pane=$(PATH="$pathnoenv" tmux capture-pane -p -t smoke2:fm-monitor-feat-k 2>/dev/null || true)
+      case "$pane" in *"no active no-mistakes run yet"*) break ;; esac
+      case "$pane" in *"no metadata found"*) fail "spawned pane resolved the WRONG state dir - env was not forwarded: $pane" ;; esac
+      waited=$((waited + 1))
+      [ "$waited" -lt 15 ] || fail "spawned pane never reached a recognizable state within 15s: $pane"
+      sleep 1
+    done
+
+    PATH="$pathnoenv" tmux kill-window -t smoke2:fm-monitor-feat-k >/dev/null 2>&1 || true
+    "$REAL_TMUX" -L "$SOCKET2" kill-server >/dev/null 2>&1 || true
+    SOCKET2=""
+    pass "real tmux: FM_HOME/FM_STATE_OVERRIDE/PATH reach the spawned pane even when the tmux server's own start env has none of them"
+  }
+
+  # A monitor left open for a task that never actually starts validation must
+  # not poll forever - the regression this whole suite exists to prevent (a
+  # test spawning an unbounded real --loop once hung the entire suite until
+  # a live process had to be killed by hand). No FM_FAKE_AXI_STATUS is ever
+  # set, so every tick is empty; with MAX_EMPTY_TICKS=2 and a 1s interval the
+  # window must close ITSELF within a few seconds, with NO manual kill-window
+  # from this test at all - proving genuine self-termination, not test-side
+  # cleanup papering over the tool's own behavior.
+  test_gives_up_after_max_empty_ticks() {
+    fm_write_meta "$D/state/feat-l.meta" "window=smoke:fm-feat-g" "worktree=$D/wt" "kind=ship"
+    tmuxp set-environment FM_FAKE_AXI_STATUS ""
+    tmuxp set-environment FM_PIPELINE_MONITOR_INTERVAL 1
+    tmuxp set-environment FM_PIPELINE_MONITOR_CLOSE_DELAY 1
+    tmuxp set-environment FM_PIPELINE_MONITOR_MAX_EMPTY_TICKS 2
+
+    local out
+    out=$(PATH="$TMUX_ENV_PATH" FM_STATE_OVERRIDE="$D/state" "$MONITOR" feat-l)
+    assert_contains "$out" "opened smoke:fm-monitor-feat-l" "opens the monitor window for feat-l"
+
+    local waited=0
+    while tmuxp list-windows -t smoke -F '#{window_name}' 2>/dev/null | grep -qx fm-monitor-feat-l; do
+      sleep 1
+      waited=$((waited + 1))
+      [ "$waited" -lt 15 ] || fail "monitor window did not give up and self-close after max-empty-ticks (would hang forever in production)"
+    done
+    # Restore the shared session's defaults for any test added after this one.
+    tmuxp set-environment FM_PIPELINE_MONITOR_MAX_EMPTY_TICKS 3
+    pass "real tmux: the monitor window gives up and closes itself after FM_PIPELINE_MONITOR_MAX_EMPTY_TICKS with no run ever appearing"
+  }
+
   test_opens_and_reuses_window
   test_window_closes_on_terminal_outcome
   test_non_tmux_backend_is_noop
+  test_env_forwarding_reaches_spawned_pane
+  test_gives_up_after_max_empty_ticks
 
   cleanup_tmux
   trap - EXIT

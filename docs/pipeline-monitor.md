@@ -31,7 +31,9 @@ It does not replace [`bin/fm-crew-state.sh`](../bin/fm-crew-state.sh): that scri
 
 ## Lifecycle
 
-The window closes itself once the run reaches an `outcome:` (pass or fail) or the task is torn down (its `state/<id>.meta` or worktree disappears) - it prints a final message, pauses a few seconds so it is readable, then exits, which closes the tmux window (and it also explicitly runs `tmux kill-window` on itself as a fallback in case a `remain-on-exit on` tmux config would otherwise leave a dead pane behind).
+The window closes itself once the run reaches an `outcome:` (pass or fail), the task is torn down (its `state/<id>.meta` or worktree disappears), or no `no-mistakes` run ever appears for `FM_PIPELINE_MONITOR_MAX_EMPTY_TICKS` consecutive checks - it prints a final message, pauses a few seconds so it is readable, then exits, which closes the tmux window (and it also explicitly runs `tmux kill-window` on itself as a fallback in case a `remain-on-exit on` tmux config would otherwise leave a dead pane behind).
+That last case matters because a monitor is often opened right when validation is triggered, before the crewmate's own `no-mistakes axi run` has actually started - if validation is never triggered at all (the task is abandoned, reassigned, or the crewmate never gets to it), the monitor must not poll forever; it gives up after the configured number of empty checks instead.
+The loop also exits promptly on `SIGTERM`/`SIGINT` rather than waiting out a full refresh interval first.
 Opening the monitor a second time for the same task reuses the existing window instead of creating a duplicate.
 
 ## Backend support
@@ -52,3 +54,4 @@ Absent or any value other than `on` keeps today's behavior (manual only).
 - `FM_PIPELINE_MONITOR_TAIL` - lines of the active step's log tail to show (default 25).
 - `FM_PIPELINE_MONITOR_CLOSE_DELAY` - seconds the final message stays up before the window closes (default 5).
 - `FM_PIPELINE_MONITOR_NM_TIMEOUT` - bound, in seconds, on each `no-mistakes` call (default 10; uses `timeout`/`gtimeout` when available, unbounded otherwise since this is a display refresh, not a correctness-critical decision).
+- `FM_PIPELINE_MONITOR_MAX_EMPTY_TICKS` - consecutive no-active-run checks tolerated before the loop gives up and closes (default 360, about 30 minutes at the default interval; `0` disables the guard - not recommended for a window a captain might leave open unattended).
