@@ -60,6 +60,12 @@ That keeps a tmux pane nested inside herdr on the tmux transport, matching the r
 Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the legacy `firstmate:0` tmux fallback with a warning.
 Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
 
+## Pipeline monitor (config/pipeline-monitor)
+
+`bin/fm-pipeline-monitor.sh <task-id>` is a standalone, read-only command that opens a tmux window live-tailing a crewmate's no-mistakes validation run (see [`docs/pipeline-monitor.md`](pipeline-monitor.md)).
+It is opt-in: set the local, gitignored `config/pipeline-monitor` file to `on` to have firstmate also open it right after triggering validation (AGENTS.md section 7, "Validate"); absent or any other value keeps it manual-only.
+It is tmux-only for now and never blocks or mutates a run on any backend.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes runs firstmate's bash behavior suite directly.

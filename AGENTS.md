@@ -81,6 +81,7 @@ config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "
 config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = falls through to runtime auto-detection (the runtime firstmate itself is executing inside), then tmux; tmux is the verified reference backend (docs/tmux-backend.md), while herdr, zellij, orca, and cmux are experimental spawn backends (docs/herdr-backend.md, docs/zellij-backend.md, docs/orca-backend.md, docs/cmux-backend.md) - herdr and cmux can also be selected by runtime auto-detection, zellij and orca never are (always explicit); not inherited into secondmate homes
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
+config/pipeline-monitor  opt-in flag for auto-opening the no-mistakes pipeline monitor when validation starts; LOCAL, gitignored; absent or anything but "on" = manual-only (section 7 "Validate", docs/pipeline-monitor.md)
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         captain's curated personal preferences and working style; LOCAL, gitignored, and canonical even if harness memory mirrors it
@@ -547,6 +548,7 @@ After any merge you perform without asking the captain, post a one-line "merged 
 
 For `no-mistakes`-mode ship tasks, when a crewmate's status says `done`, trigger validation using the crew's harness from `state/<id>.meta`.
 Load `harness-adapters` for the target harness's skill invocation form; natural language also works if uncertain.
+When `config/pipeline-monitor` is `on`, also run `bin/fm-pipeline-monitor.sh <id>` right after triggering validation to open a live, read-only tail of the run (docs/pipeline-monitor.md); it is an observer only, so a missing or failed monitor window never blocks or changes validation.
 
 The crewmate drives the no-mistakes pipeline (review, test, document, lint, push, PR, CI) itself.
 The ship brief intentionally does not restate no-mistakes gate mechanics; it points the crewmate to the version-matched SKILL.md loaded by `/no-mistakes`, `no-mistakes axi run --help`, and per-response `help` lines.
