@@ -28,6 +28,8 @@
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path.
+# Ship briefs close with a reviewer-awareness quality bar before the definition
+# of done; scout briefs omit it because its wording is ship-specific.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -256,6 +258,10 @@ $RULE1
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
 If this task produced durable project-intrinsic knowledge, record it in \`AGENTS.md\` as part of your change.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+
+# Quality bar
+Your work here will be independently and adversarially reviewed before it ships - by no-mistakes' review gate when this project runs one, and by firstmate or the captain before merge either way.
+Hold your own work to that same bar and self-review before you report done.
 
 $DOD
 EOF

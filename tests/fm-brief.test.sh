@@ -54,9 +54,29 @@ test_ship_modes_generate_clean_briefs() {
     assert_present "$brief" "$id: brief was not scaffolded"
     assert_grep "# Definition of done" "$brief" "$id: brief missing Definition of done section"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
+    assert_grep "# Quality bar" "$brief" "$id: brief missing the reviewer-awareness Quality bar section"
+    assert_grep "independently and adversarially reviewed" "$brief" "$id: brief missing the reviewer-awareness statement"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+}
+
+# Scout briefs deliver a report, not shipped code, and their existing
+# Definition-of-done already demands stand-alone, evidence-backed findings
+# (commands run, output, file:line references) reviewed by firstmate and then
+# the captain. The reviewer-awareness Quality bar section is ship-specific
+# scaffolding (it names no-mistakes' review gate and pre-merge review), so
+# scout briefs intentionally do not get it.
+test_scout_brief_has_no_quality_bar_section() {
+  local home id brief
+  home="$TMP_ROOT/scout-home"
+  mkdir -p "$home/data"
+  id="brief-scout-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_no_grep "# Quality bar" "$brief" "scout brief unexpectedly got the ship-specific Quality bar section"
+  pass "fm-brief.sh: scout brief has no Quality bar section"
 }
 
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
@@ -79,3 +99,4 @@ test_no_mistakes_dod_wording() {
 test_script_parses
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
+test_scout_brief_has_no_quality_bar_section

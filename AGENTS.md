@@ -838,8 +838,10 @@ For a ship task the definition of done is shaped by the project's delivery mode 
 The no-mistakes brief points to no-mistakes' version-matched guidance and keeps only firstmate-specific wrapper rules for `ask-user` escalation, `--yes` avoidance, and the CI-green done line.
 The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
 Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` when the project already has agent-memory files or when the task produced durable project-intrinsic knowledge, then record proportionate learnings in `AGENTS.md`.
+Ship briefs close with a reviewer-awareness Quality bar, just before the definition of done: the crewmate is told its work will be independently and adversarially reviewed before it ships - by no-mistakes' review gate when the project runs one, and by firstmate or the captain before merge either way - and that it must hold itself to that bar and self-review before reporting done.
 For scout tasks add `--scout`: the scaffold swaps the definition of done for the report contract (findings to `data/<id>/report.md`, no branch, no push, no PR) and declares the worktree scratch; scout is mode-agnostic.
 Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.
+They do not include the Quality bar either, because its wording is ship-specific and their own definition of done already demands a stand-alone, evidence-backed report.
 For secondmates use `bin/fm-brief.sh <id> --secondmate <project>...`.
 The scaffold writes a charter brief instead of a task brief.
 Set `FM_SECONDMATE_CHARTER='<charter>'` to fill the charter text and `FM_SECONDMATE_SCOPE='<scope>'` when the routing scope differs.
