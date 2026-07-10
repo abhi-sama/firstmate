@@ -99,6 +99,24 @@ test_resolves_worktree_and_shows_active_run() {
   pass "resolves the worktree from meta and shows the active run's step and log tail"
 }
 
+test_active_step_falls_through_to_top_level_ci_status() {
+  local d; d=$(new_case ci-status)
+  make_repo "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-m.meta" "window=fm:fm-feat-m" "worktree=$d/wt" "kind=ship"
+  # No steps[] table and no gate: scalar - only a top-level `status: ci` line,
+  # the third and last branch active_step() falls through to once neither of
+  # the other two matches.
+  FM_FAKE_AXI_STATUS=$'run:\n  id: "01RUN"\nstatus: ci'
+  FM_FAKE_AXI_LOGS="waiting on checks..."
+  local out rc
+  out=$(run_tick "$d" feat-m); rc=$?
+  expect_code 0 "$rc" "a ci-status run keeps ticking (exit 0)"
+  assert_contains "$out" "tail of step 'ci'" "falls through to the top-level status: ci branch when no steps table or gate field matches"
+  assert_contains "$out" "waiting on checks..." "shows the ci step's log tail"
+  pass "active_step falls through to the top-level 'status: ci' branch when neither a steps-table row nor a gate field matches"
+}
+
 test_no_active_run_is_graceful() {
   local d; d=$(new_case norun)
   make_repo "$d/wt"
@@ -211,6 +229,7 @@ test_usage_errors() {
 }
 
 test_resolves_worktree_and_shows_active_run
+test_active_step_falls_through_to_top_level_ci_status
 test_no_active_run_is_graceful
 test_terminal_outcome_is_detected
 test_torn_down_missing_meta_is_graceful
