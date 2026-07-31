@@ -164,6 +164,30 @@ hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
 }
 
+# The pane FOOTER is the trailing block of non-blank lines where every verified
+# harness renders its status line. Two different things live there and they must
+# be read differently. window_is_busy scans it for the busy indicator, which is
+# what it is for. But it also carries live counters - claude renders a session
+# clock, a running cost and a context gauge - that keep moving on a pane doing NO
+# work at all (verified 2026-07-31 against a live idle pane:
+# docs/incident-2026-07-31-idle-pane-footer.md). Hashing them made an abandoned
+# pane indistinguishable from a working one, so its .stale-*/.count-* bookkeeping
+# was invalidated on every tick: the same idle pane re-surfaced once per tick,
+# and its wedge timer was reset before it could ever mature. The stale hash
+# therefore covers the pane BODY only - the transcript above the footer, which
+# moves iff the crew is actually producing output. Same constant on both sides,
+# so the two reads cannot drift apart.
+PANE_FOOTER_LINES=${FM_PANE_FOOTER_LINES:-6}
+
+# Hash of a capture's body: its non-blank lines minus the trailing footer block.
+# A capture with no more lines than the footer hashes as empty, which is stable -
+# the same as today's empty-pane behavior, and window_is_busy still gates it.
+hash_pane_body() {  # <tail40>
+  printf '%s' "$1" | grep -v '^[[:space:]]*$' \
+    | awk -v n="$PANE_FOOTER_LINES" '{ b[NR] = $0 } END { for (i = 1; i <= NR - n; i++) print b[i] }' \
+    | hash_pane
+}
+
 # window_is_busy: 0 (busy) iff the task's harness is actively working. Prefers
 # a backend's native semantic busy state (fm_backend_busy_state - herdr's
 # agent.get; herdr-addendum "busy state" row, "the first backend where
@@ -179,7 +203,7 @@ window_is_busy() {  # <window> <tail40>
     busy) return 0 ;;
     idle) return 1 ;;
     *)
-      printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"
+      printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -"$PANE_FOOTER_LINES" | grep -qiE "$BUSY_REGEX"
       ;;
   esac
 }
