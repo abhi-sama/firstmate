@@ -26,6 +26,12 @@
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine re-arm. Unless
 #                          afk is active.
+#                          Staleness is judged on the pane BODY (the transcript
+#                          above the harness footer), never on the footer, whose
+#                          live counters tick on an abandoned pane; and a pane
+#                          still claiming busy with no body output for
+#                          FM_BUSY_CLAIM_MAX surfaces once, so a rendered busy
+#                          signature cannot suppress supervision indefinitely.
 #   check: <script>: <out> per-task check output, always actionable
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
@@ -106,7 +112,8 @@ fi
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
-HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
+HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap, idle fleet
+HEARTBEAT_MAX_INFLIGHT=${FM_HEARTBEAT_MAX_INFLIGHT:-900}  # backoff cap while any task is in flight
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
@@ -311,6 +318,33 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   esac
 }
 
+# A busy signature is pane-RENDERED, so a session that dies mid-turn can leave it
+# standing on screen with nothing behind it - and while it stands, window_is_busy
+# suppresses the whole triage block below, so no .stale-* is ever written and the
+# crew is never classified at all. That is the one branch consistent with the
+# 2026-07-31 incident's missing .stale-* file. Bound it rather than trust the
+# footer indefinitely: a pane still claiming busy whose BODY has produced no new
+# output for BUSY_CLAIM_MAX is surfaced once per episode (the marker is cleared
+# the moment the body moves again, so a genuinely long tool call that resumes
+# printing re-arms cleanly). Deliberately generous - real work prints far more
+# often than this - so it can only ever catch a pane that has actually stopped.
+BUSY_CLAIM_MAX=${FM_BUSY_CLAIM_MAX:-1800}
+
+busy_claim_check() {  # <window> <body-since-file> <claim-marker-file>
+  local win=$1 since_file=$2 marker=$3 since age reason
+  [ -e "$marker" ] && return 0
+  since=$(cat "$since_file" 2>/dev/null || true)
+  case "$since" in
+    ''|*[!0-9]*) date +%s > "$since_file"; return 0 ;;
+  esac
+  age=$(( $(date +%s) - since ))
+  [ "$age" -ge "$BUSY_CLAIM_MAX" ] || return 0
+  reason="stale: $win (busy signature standing ${age}s with no pane output - the session may have died mid-turn leaving its footer rendered)"
+  fm_wake_append stale "$win" "$reason" || exit 1
+  : > "$marker"
+  wake "$reason"
+}
+
 # Check and heartbeat cadence must survive actionable exits and restarts: the
 # watcher may be relaunched before in-memory counters reach their threshold on a
 # busy fleet. Persist the schedule as file mtimes instead.
@@ -508,22 +542,27 @@ EOF
     # it through status writes and heartbeats, not pane-idle staleness.
     [ "$(window_kind "$w")" = secondmate ] && continue
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
-    h=$(printf '%s' "$tail40" | hash_pane)
+    # Progress is the BODY changing, never the footer: see hash_pane_body.
+    h=$(hash_pane_body "$tail40")
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
     sf="$STATE/.stale-$key"
     ssf="$STATE/.stale-since-$key"
     ewf="$STATE/.wedge-escalations-$key"
+    bsf="$STATE/.body-since-$key"
+    bcf="$STATE/.busy-claim-$key"
+    # Busy match: a backend's native semantic state when available (herdr),
+    # else the footer block only (where every verified harness renders its busy
+    # indicator) so busy-looking strings in displayed content cannot suppress
+    # stale detection. Read once per poll and reused below, so the two gates
+    # that depend on it can never disagree within a cycle.
+    if window_is_busy "$w" "$tail40"; then busy=1; else busy=0; fi
     prev=$(cat "$hf" 2>/dev/null || true)
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
-      # Busy match: a backend's native semantic state when available (herdr),
-      # else the last 6 non-blank lines only (the TUI footer area, where every
-      # verified harness renders its busy indicator) so busy-looking strings
-      # in displayed content cannot suppress stale detection.
-      if [ "$n" -ge 2 ] && ! window_is_busy "$w" "$tail40"; then
+      if [ "$n" -ge 2 ] && [ "$busy" = 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
         if afk_present; then
@@ -605,10 +644,15 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
-      # Pane content changed: the crew is active again, so reset the escalation
-      # timer and the consecutive wedge-escalation count.
-      rm -f "$ssf" "$ewf"
+      # The pane BODY changed: the crew produced output, so it is genuinely
+      # active. Reset the escalation timer, the consecutive wedge-escalation
+      # count, and the busy-claim episode. A footer-only tick no longer reaches
+      # here, which is the whole point - it is not evidence of work.
+      date +%s > "$bsf"
+      rm -f "$ssf" "$ewf" "$bcf"
     fi
+    # Bound how long a rendered busy signature may suppress everything above.
+    [ "$busy" = 1 ] && busy_claim_check "$w" "$bsf" "$bcf"
   done < <(recorded_windows)
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
@@ -619,6 +663,14 @@ EOF
   [ "$streak" -gt 12 ] && streak=12
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
+  # The backoff exists so an IDLE fleet stops burning turns. A fleet with work in
+  # flight is not idle, and letting the cadence widen to the idle cap there
+  # leaves the fail-safe fleet-scan effectively unarmed for hours (2026-07-31:
+  # observed heartbeat gaps of over two hours with a task running). Cap it much
+  # tighter whenever any task is recorded in flight.
+  if [ "$hb" -gt "$HEARTBEAT_MAX_INFLIGHT" ] && [ -n "$(recorded_windows)" ]; then
+    hb=$HEARTBEAT_MAX_INFLIGHT
+  fi
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the

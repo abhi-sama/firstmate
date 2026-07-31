@@ -246,6 +246,17 @@ hash_text() {
   fi
 }
 
+# Hash of a pane BODY - the capture's non-blank lines minus its trailing footer
+# block - mirroring bin/fm-watch.sh's hash_pane_body byte for byte. The watcher
+# hashes the body and never the footer, because harness footers carry live
+# counters that tick on a pane doing no work (see fm-watch.sh). Tests that prime
+# .hash-* must prime what the watcher will actually compute.
+hash_body_text() {  # <capture> [footer-lines]
+  printf '%s' "$1" | grep -v '^[[:space:]]*$' \
+    | awk -v n="${2:-6}" '{ b[NR] = $0 } END { for (i = 1; i <= NR - n; i++) print b[i] }' \
+    | { if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi; }
+}
+
 dead_pid() {
   local p=999999
   while kill -0 "$p" 2>/dev/null; do
