@@ -651,6 +651,124 @@ test_footer_tick_does_not_reset_wedge_timer() {
   pass "the wedge timer matures on a pane whose footer ticks, instead of being reset by every tick"
 }
 
+# The chatty half of the same defect, observed live on 2026-07-31: repeated
+# "stale: <window>" wakes minutes apart for one idle claude pane. When the crew
+# reads NOT provably working the stale is surfaced - correctly, once - but the
+# .stale-* suppressor remembers a hash that the next footer tick invalidates, so
+# the identical idle pane surfaces again on every tick, forever. Body hashing
+# makes the suppressor hold.
+test_footer_tick_surfaces_idle_pane_only_once() {
+  local dir state fakebin out capture_file window key sig pid ticker
+  dir=$(make_case footer-tick-once); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-footer-once"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/footer-once.meta"
+  printf 'working: implementing\n' > "$state/footer-once.status"
+  sig=$(seen_sig "$state/footer-once.status"); printf '%s' "$sig" > "$state/.seen-footer-once_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  ticker=$(start_footer_ticker "$capture_file" 'API Error: Connection closed mid-response')
+  sleep 0.5
+
+  # Round 1: the crew has stopped, so it must surface exactly as it does today.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_PANE_FOOTER_LINES=1 FM_BUSY_CLAIM_MAX=999999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_for_exit "$pid" 200; then
+    stop_ticker "$ticker"; fail "a stopped crew on a ticking-footer pane was not surfaced at all"
+  fi
+  grep -F "stale: $window" "$out" >/dev/null || { stop_ticker "$ticker"; fail "round 1 did not print the stale wake: $(cat "$out")"; }
+
+  # Let the footer tick at least once, then re-arm. The pane is byte-different
+  # but substantively identical, so this must NOT wake firstmate a second time.
+  sleep 4
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_PANE_FOOTER_LINES=1 FM_BUSY_CLAIM_MAX=999999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 80; then
+    stop_ticker "$ticker"
+    fail "the same idle pane re-surfaced after a cosmetic footer tick: $(cat "$out")"
+  fi
+  stop_ticker "$ticker"
+  [ ! -s "$out" ] || { reap "$pid"; fail "round 2 printed a wake reason for an unchanged idle pane: $(cat "$out")"; }
+  reap "$pid"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$(cat "$state/.hash-$key" 2>/dev/null || true)" ] \
+    || fail "the stale suppressor no longer matches the pane body hash, so it will re-fire"
+  unset FM_FAKE_CREW_STATE
+  pass "an idle pane surfaces once, not once per cosmetic footer tick"
+}
+
+# A busy signature is pane-RENDERED, so a session that dies mid-turn can leave it
+# standing with nothing behind it - and while it stands, window_is_busy suppresses
+# the whole triage block, so no .stale-* is ever written and the crew is never
+# classified at all. That is the one branch consistent with the incident's missing
+# .stale-* file. FM_BUSY_CLAIM_MAX bounds it.
+test_busy_claim_is_bounded() {
+  local dir state fakebin out drain_out capture_file window key sig pid
+  dir=$(make_case busy-claim-bound); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-busy-forever"
+  # A frozen transcript under a footer that never stops claiming busy.
+  printf 'running the build...\n  esc to interrupt\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/busy-forever.meta"
+  printf 'working: implementing\n' > "$state/busy-forever.status"
+  sig=$(seen_sig "$state/busy-forever.status"); printf '%s' "$sig" > "$state/.seen-busy-forever_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_CLAIM_MAX=3 FM_PANE_FOOTER_LINES=1 FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 200 || fail "a pane claiming busy with no output was never surfaced (it can suppress supervision forever)"
+  grep -F "stale: $window" "$out" >/dev/null || fail "busy-claim bound did not print a stale wake: $(cat "$out")"
+  grep -F "busy signature standing" "$out" >/dev/null || fail "busy-claim wake did not explain itself: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the busy-claim wake failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "busy-claim wake was not queued"
+  [ -e "$state/.busy-claim-$key" ] || fail "busy-claim episode marker was not recorded (it would re-fire every poll)"
+  unset FM_FAKE_CREW_STATE
+  pass "a rendered busy signature cannot suppress supervision past FM_BUSY_CLAIM_MAX"
+}
+
+# The non-chatty half: a crew that is genuinely working prints, so its BODY moves
+# every poll. The busy-claim bound is anchored to body output, so it can never
+# fire on real work however long the run lasts.
+test_working_crew_never_hits_the_busy_claim_bound() {
+  local dir state fakebin out capture_file window sig pid ticker
+  dir=$(make_case busy-claim-working); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-really-working"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/really-working.meta"
+  printf 'working: implementing\n' > "$state/really-working.status"
+  sig=$(seen_sig "$state/really-working.status"); printf '%s' "$sig" > "$state/.seen-really-working_status"
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+  # Body changes every tick AND the footer claims busy: a crew actually working.
+  ticker=$(start_footer_ticker "$capture_file" 'compiling module' ' esc to interrupt')
+  sleep 0.5
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_CLAIM_MAX=3 FM_PANE_FOOTER_LINES=1 FM_STALE_ESCALATE_SECS=3 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 150; then
+    stop_ticker "$ticker"
+    fail "a genuinely working crew was surfaced (blunt surface-everything regression): $(cat "$out")"
+  fi
+  stop_ticker "$ticker"
+  [ ! -s "$out" ] || { reap "$pid"; fail "a working crew printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a working crew enqueued a durable wake record"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a crew whose pane body keeps moving is never surfaced by the busy-claim bound"
+}
+
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   local dir state fakebin out capture_file window key pane_hash sig pid since
   dir=$(make_case nonterminal-stale-timer-repair); state="$dir/state"; fakebin="$dir/fakebin"
@@ -875,9 +993,13 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_footer_tick_does_not_reset_wedge_timer
+test_footer_tick_surfaces_idle_pane_only_once
+test_busy_claim_is_bounded
+test_working_crew_never_hits_the_busy_claim_bound
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
+test_heartbeat_backoff_capped_while_work_in_flight
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
