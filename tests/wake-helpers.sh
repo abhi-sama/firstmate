@@ -253,7 +253,7 @@ hash_text() {
 # .hash-* must prime what the watcher will actually compute.
 hash_body_text() {  # <capture> [footer-lines]
   printf '%s' "$1" | grep -v '^[[:space:]]*$' \
-    | awk -v n="${2:-6}" '{ b[NR] = $0 } END { for (i = 1; i <= NR - n; i++) print b[i] }' \
+    | awk -v n="${2:-${FM_PANE_FOOTER_LINES:-6}}" '{ b[NR] = $0 } END { for (i = 1; i <= NR - n; i++) print b[i] }' \
     | { if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi; }
 }
 

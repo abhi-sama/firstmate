@@ -138,7 +138,7 @@ ok - the wedge timer matures on a pane whose footer ticks, instead of being rese
 FIXED_EXIT=0
 ```
 
-The fourth row is worth stating plainly, because it contradicts the obvious guess about this incident.
+The `test_long_working_stretch_then_death_is_surfaced_promptly` row is worth stating plainly, because it contradicts the obvious guess about this incident.
 A pane that moves for a long stretch and then goes genuinely static, with no busy signature, was **already** detected within two polls before any of this work - that path was never broken.
 The same day's independent observations confirm it from both directions: a live session reported repeated `stale:` wakes for an idle pane, and a second crewmate whose turn died on the same API error was surfaced within minutes.
 The failure was never "a static pane is not noticed".

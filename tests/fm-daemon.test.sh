@@ -357,6 +357,43 @@ test_terminal_stale_escalate_leaves_no_marker() {
   pass "terminal-stale escalate removes its marker so housekeeping does not re-escalate"
 }
 
+# The watcher's busy-claim bound fires under afk too, and it is the ONLY signal a
+# pane sitting busy over a dead turn produces (no status write, no turn-end). Its
+# reason carries a parenthesized detail; the daemon must read the window out of
+# it, escalate on the watcher's own verdict, and never key a marker on the prose.
+# Housekeeping cannot re-derive that verdict - its recheck reads the same
+# rendered signature and drops the marker as "still busy" - so a self-handle here
+# means the bound never reaches the captain while they are away.
+test_detailed_stale_escalates_on_the_watchers_verdict() {
+  local dir state win key marker
+  dir=$(make_supercase stale-busy-claim)
+  state="$dir/state"
+  win="sess:fm-busy-forever"
+  printf 'working: long tool call\n' > "$state/busy-forever.status"
+  FM_STATE_OVERRIDE="$state" handle_wake \
+    "stale: $win (busy signature standing 1800s with no pane output - the session may have died mid-turn leaving its footer rendered)" "$state"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "the busy-claim bound was self-handled, so it never reaches the captain while afk"
+  grep -q "$win" "$state/.subsuper-escalations" \
+    || fail "the escalated digest line does not name the window: $(cat "$state/.subsuper-escalations")"
+  grep -q 'busy signature standing 1800s' "$state/.subsuper-escalations" \
+    || fail "the escalated digest line dropped the watcher's reason: $(cat "$state/.subsuper-escalations")"
+  key=$(printf '%s' "busy-forever" | tr ':/.' '___')
+  [ ! -e "$state/.subsuper-stale-$key" ] \
+    || fail "detailed stale left a persistence marker housekeeping would re-escalate"
+  for marker in "$state"/.subsuper-stale-*; do
+    [ -e "$marker" ] || continue
+    fail "detailed stale keyed a marker on its prose: $(basename "$marker")"
+  done
+
+  # A wedge escalation carries a detail too, and must route the same way.
+  : > "$state/.subsuper-escalations"
+  FM_STATE_OVERRIDE="$state" handle_wake \
+    "stale: $win (idle 240s, possible wedge, escalation 1)" "$state"
+  [ -s "$state/.subsuper-escalations" ] || fail "a wedge-detail stale was self-handled"
+  pass "a detail-carrying stale reason escalates on the watcher's verdict, unmangled"
+}
+
 test_signal_escalate_marks_seen_no_catchall_refire() {
   local dir state key
   dir=$(make_supercase signal-seen)
@@ -987,6 +1024,7 @@ test_handle_wake_routes_self_and_escalate
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
 test_terminal_stale_escalate_leaves_no_marker
+test_detailed_stale_escalates_on_the_watchers_verdict
 test_signal_escalate_marks_seen_no_catchall_refire
 test_collapse_newlines_pure
 test_afk_absent_daemon_does_not_inject

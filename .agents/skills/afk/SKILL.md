@@ -143,6 +143,13 @@ Classify each wake this way:
   (`done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged`)
   -> self-handle. Captain-relevant verb -> escalate.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
+- `stale` carrying a parenthesized detail -> escalate. The watcher emits a bare
+  `stale: <window>` for a raw first sighting, and attaches a detail only after
+  its own threshold logic already decided (a matured wedge timer, or the
+  `FM_BUSY_CLAIM_MAX` bound on a pane whose busy signature stands over no
+  output). Housekeeping cannot re-derive that verdict, because its recheck reads
+  the same rendered signature and clears the marker as still-busy, so the
+  watcher's decision is honored rather than re-triaged.
 - `stale` with a terminal status -> escalate. Non-terminal stale is transient:
   record a marker and self-handle. If the pane is still idle past
   `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a

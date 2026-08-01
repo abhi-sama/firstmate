@@ -336,7 +336,10 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # work prints far more often than this - so it can only ever catch a pane that
 # has actually stopped.
 BUSY_CLAIM_MAX=${FM_BUSY_CLAIM_MAX:-1800}
-case "$BUSY_CLAIM_MAX" in ''|*[!0-9]*) BUSY_CLAIM_MAX=1800 ;; esac
+# Zero is rejected alongside the non-numeric values: it reads like "disable the
+# bound" but inverts it, making every standing signature trip on its first poll -
+# exactly the surface-everything regression this bound is shaped to avoid.
+case "$BUSY_CLAIM_MAX" in ''|0|*[!0-9]*) BUSY_CLAIM_MAX=1800 ;; esac
 
 # Both halves of the claim must have held for BUSY_CLAIM_MAX, so the episode is
 # timed from the LATER of two clocks: .body-since-* (the body last produced
