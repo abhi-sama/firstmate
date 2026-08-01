@@ -609,6 +609,23 @@ start_footer_ticker() {  # <file> <body> [footer-suffix]
   printf '%s' "$!"
 }
 
+# The opposite fixture: a pane whose BODY changes every second under a constant
+# busy footer - a crew actually producing output. Echoes the ticker pid.
+start_body_ticker() {  # <file>
+  local file=$1
+  (
+    i=0
+    while :; do
+      { printf 'compiling module %d\n' "$i"
+        printf '  session 1m - context 68%% - esc to interrupt\n'
+      } > "$file"
+      i=$((i + 1))
+      sleep 1
+    done
+  ) </dev/null >/dev/null 2>&1 &
+  printf '%s' "$!"
+}
+
 # Stop a ticker started above, scoped to exactly that pid - never a pattern kill,
 # which would reach every firstmate home's processes and not just this test's.
 stop_ticker() {  # <pid>
@@ -748,18 +765,16 @@ test_working_crew_never_hits_the_busy_claim_bound() {
   printf 'working: implementing\n' > "$state/really-working.status"
   sig=$(seen_sig "$state/really-working.status"); printf '%s' "$sig" > "$state/.seen-really-working_status"
   export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
-  # Body changes every tick AND the footer claims busy: a crew actually working.
-  ticker=$(start_footer_ticker "$capture_file" 'compiling module' ' esc to interrupt')
+  # The BODY changes every second under a constant busy footer: a crew actually
+  # producing output. (Using the footer ticker here would be the wrong fixture -
+  # it varies only the footer, leaving the body constant, which is precisely the
+  # dead-pane-with-a-rendered-busy-signature case the bound is meant to catch.)
+  ticker=$(start_body_ticker "$capture_file")
   sleep 0.5
 
-  # The bound is comfortably longer than the ticker period, mirroring the real
-  # ratio (1800s against work that prints far more often). Setting it EQUAL to
-  # the period would test a boundary race - whether a poll lands after the bound
-  # elapses but before the watcher observes the next body - rather than the
-  # property that matters here, which is that body output resets the bound at all.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_BUSY_CLAIM_MAX=8 FM_PANE_FOOTER_LINES=1 FM_STALE_ESCALATE_SECS=8 \
+    FM_BUSY_CLAIM_MAX=3 FM_PANE_FOOTER_LINES=1 FM_STALE_ESCALATE_SECS=3 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_live "$pid" 150; then
