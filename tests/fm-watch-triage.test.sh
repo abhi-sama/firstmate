@@ -668,6 +668,51 @@ test_footer_tick_does_not_reset_wedge_timer() {
   pass "the wedge timer matures on a pane whose footer ticks, instead of being reset by every tick"
 }
 
+# The incident's shape end to end: a crew works for an extended stretch, its turn
+# dies mid-response, and the pane goes static at an idle prompt. Supervision must
+# notice within a bounded time - two polls once the body stops moving and the
+# footer stops claiming busy - rather than waiting out a heartbeat backoff.
+test_long_working_stretch_then_death_is_surfaced_promptly() {
+  local dir state fakebin out drain_out capture_file window sig pid ticker died
+  dir=$(make_case long-turn-then-death); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-long-turn"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/long-turn.meta"
+  # The task's only status line, written long before: a benign working: note, so
+  # nothing captain-relevant can surface this on the signal path.
+  printf 'working: implementing\n' > "$state/long-turn.status"
+  sig=$(seen_sig "$state/long-turn.status"); printf '%s' "$sig" > "$state/.seen-long-turn_status"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  ticker=$(start_body_ticker "$capture_file")
+  sleep 0.5
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_BUSY_CLAIM_MAX=999999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  # Phase 1: the crew is genuinely working. Nothing may surface, however long
+  # this runs - that is the "quiet stretch stays quiet" half of the contract.
+  if ! wait_live "$pid" 80; then
+    stop_ticker "$ticker"
+    fail "a working crew was surfaced during its own turn: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { stop_ticker "$ticker"; reap "$pid"; fail "working phase printed a wake: $(cat "$out")"; }
+
+  # Phase 2: the turn dies mid-response. The pane freezes at an idle prompt with
+  # no busy signature and everything uncommitted.
+  stop_ticker "$ticker"
+  printf 'API Error: Connection closed mid-response\n> \n  context 68%%\n' > "$capture_file"
+  died=$(date +%s)
+  wait_for_exit "$pid" 200 || fail "a crew whose turn died was never surfaced (the 2026-07-31 incident)"
+  [ "$(( $(date +%s) - died ))" -le 20 ] || fail "the dead crew took longer than the stated two-poll bound to surface"
+  grep -F "stale: $window" "$out" >/dev/null || fail "death was not reported as a stale wake: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the death wake failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "death wake was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a crew that works a long stretch and then dies mid-turn is surfaced within the stated bound"
+}
+
 # The chatty half of the same defect, observed live on 2026-07-31: repeated
 # "stale: <window>" wakes minutes apart for one idle claude pane. When the crew
 # reads NOT provably working the stale is surfaced - correctly, once - but the
@@ -1018,6 +1063,7 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_footer_tick_does_not_reset_wedge_timer
+test_long_working_stretch_then_death_is_surfaced_promptly
 test_footer_tick_surfaces_idle_pane_only_once
 test_busy_claim_is_bounded
 test_working_crew_never_hits_the_busy_claim_bound
