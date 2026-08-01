@@ -36,11 +36,14 @@
 #     reason.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
-#   - Bounded wedge latency: a stale pane is escalated only after it has been
-#     idle for STALE_ESCALATE_SECS (configurable), rechecked once. A wedged
-#     crewmate is therefore detected within STALE_ESCALATE_SECS + a tick, never
-#     lost. Crewmates are autonomous, so a delayed stale response does not stall
-#     a healthy crewmate's own progress.
+#   - Bounded wedge latency: a bare "stale: <window>" first sighting is escalated
+#     only after it has been idle for STALE_ESCALATE_SECS (configurable),
+#     rechecked once. A wedged crewmate is therefore detected within
+#     STALE_ESCALATE_SECS + a tick, never lost. Crewmates are autonomous, so a
+#     delayed stale response does not stall a healthy crewmate's own progress.
+#     A stale reason carrying a parenthesized detail skips that wait: the watcher
+#     attaches one only after its own threshold logic already concluded something
+#     needs a look, and housekeeping's recheck cannot re-derive that verdict.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
 #     writes state/.subsuper-inject-wedged if submit still cannot be confirmed.

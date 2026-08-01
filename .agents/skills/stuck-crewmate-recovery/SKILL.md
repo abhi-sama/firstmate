@@ -16,6 +16,8 @@ The target window's harness is recorded as `harness=` in `state/<id>.meta`.
 Escalate in order:
 
 1. Peek the pane.
+   Read the transcript, not the harness footer: a busy signature is pane-rendered, so a turn that died mid-response can leave one standing over an idle prompt, and the footer's own counters keep ticking either way.
+   That shape is what a `stale` wake reporting a busy signature standing with no pane output means.
 2. If the crewmate is waiting on a question its brief already answers, answer in one line via `bin/fm-send.sh`.
 3. If the crewmate is confused or looping, interrupt with the adapter's interrupt key, then redirect with one corrective line.
    For example, for a single-Escape adapter: `bin/fm-send.sh <window> --key Escape`.
