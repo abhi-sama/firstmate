@@ -111,7 +111,19 @@ The point of the fix is that the worst-case notice delay is a known number rathe
 
 `tests/fm-watch-triage.test.sh` drives a real watcher against a pane with a constant body and a footer ticking every 3s - the live cadence (60s tick, 15s poll) compressed:
 
-- `test_footer_tick_does_not_reset_wedge_timer` - the silent half. Verified to fail before the fix and pass after it:
+Each test below was run against the pre-fix `bin/fm-watch.sh` (`ce0589e`) and against the fixed one, so the ledger states which ones actually reproduce the defect and which only guard it:
+
+| Test | Pre-fix | Fixed | Role |
+| --- | --- | --- | --- |
+| `test_footer_tick_does_not_reset_wedge_timer` | fails | passes | reproduces the silent half |
+| `test_footer_tick_surfaces_idle_pane_only_once` | fails | passes | reproduces the chatty half |
+| `test_busy_claim_is_bounded` | fails | passes | reproduces the rendered-busy branch |
+| `test_long_working_stretch_then_death_is_surfaced_promptly` | passes | passes | guard only |
+| `test_working_crew_never_hits_the_busy_claim_bound` | n/a | passes | non-chatty guard |
+| `test_wedge_escalation_resets_when_pane_becomes_active` | n/a | passes | non-chatty guard |
+| `test_heartbeat_backoff_capped_while_work_in_flight` | n/a | passes | in-flight cadence cap |
+
+Exact output for the first one:
 
 ```
 ########## PRE-FIX (expect FAIL) ##########
@@ -122,8 +134,9 @@ ok - the wedge timer matures on a pane whose footer ticks, instead of being rese
 FIXED_EXIT=0
 ```
 
-- `test_long_working_stretch_then_death_is_surfaced_promptly` - the incident shape end to end: nothing surfaces while the crew works, and the death surfaces within the two-poll bound.
-- `test_footer_tick_surfaces_idle_pane_only_once` - the chatty half.
-- `test_busy_claim_is_bounded` - the rendered-busy branch.
-- `test_working_crew_never_hits_the_busy_claim_bound` and `test_wedge_escalation_resets_when_pane_becomes_active` - the non-chatty guard, so the fix cannot degrade into surfacing everything.
-- `test_heartbeat_backoff_capped_while_work_in_flight` - the in-flight cadence cap.
+The fourth row is worth stating plainly, because it contradicts the obvious guess about this incident.
+A pane that moves for a long stretch and then goes genuinely static, with no busy signature, was **already** detected within two polls before any of this work - that path was never broken.
+The same day's independent observations confirm it from both directions: a live session reported repeated `stale:` wakes for an idle pane, and a second crewmate whose turn died on the same API error was surfaced within minutes.
+The failure was never "a static pane is not noticed".
+It was that a pane which is doing nothing does not go static in the first place, because its footer keeps moving - so the bookkeeping built on that hash either re-fired forever or never matured.
+A fix aimed at the guessed shape would have passed its own test and changed nothing.
