@@ -752,9 +752,14 @@ test_working_crew_never_hits_the_busy_claim_bound() {
   ticker=$(start_footer_ticker "$capture_file" 'compiling module' ' esc to interrupt')
   sleep 0.5
 
+  # The bound is comfortably longer than the ticker period, mirroring the real
+  # ratio (1800s against work that prints far more often). Setting it EQUAL to
+  # the period would test a boundary race - whether a poll lands after the bound
+  # elapses but before the watcher observes the next body - rather than the
+  # property that matters here, which is that body output resets the bound at all.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_BUSY_CLAIM_MAX=3 FM_PANE_FOOTER_LINES=1 FM_STALE_ESCALATE_SECS=3 \
+    FM_BUSY_CLAIM_MAX=8 FM_PANE_FOOTER_LINES=1 FM_STALE_ESCALATE_SECS=8 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_live "$pid" 150; then

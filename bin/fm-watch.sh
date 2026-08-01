@@ -177,7 +177,7 @@ hash_pane() {
 # what it is for. But it also carries live counters - claude renders a session
 # clock, a running cost and a context gauge - that keep moving on a pane doing NO
 # work at all (verified 2026-07-31 against a live idle pane:
-# docs/incident-2026-07-31-idle-pane-footer.md). Hashing them made an abandoned
+# docs/incident-2026-07-31-pane-footer-hashing.md). Hashing them made an abandoned
 # pane indistinguishable from a working one, so its .stale-*/.count-* bookkeeping
 # was invalidated on every tick: the same idle pane re-surfaced once per tick,
 # and its wedge timer was reset before it could ever mature. The stale hash

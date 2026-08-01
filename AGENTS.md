@@ -104,7 +104,7 @@ state/               volatile runtime signals; gitignored
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
-  .hash-* .count-* .stale-* .stale-since-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
+  .hash-* .count-* .stale-* .stale-since-* .wedge-escalations-* .body-since-* .busy-claim-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
@@ -697,7 +697,13 @@ When a task reaches a terminal state on any of these wakes (a `done`/merge `chec
 When any wake's status reports a merged PR naming a project this home also has cloned under `projects/`, run `bin/fm-fleet-sync.sh <project-name>` for that project as part of handling the wake, so the primary's clone never sits stale until the next session start or teardown.
 
 Heartbeats back off exponentially while they are the only wakes firing (600s doubling to a 2h cap - an idle fleet stops burning turns); any signal, stale, or check wake resets the cadence to the base interval.
+A fleet with work in flight is not an idle fleet, so while any task is recorded in flight that cap tightens to `FM_HEARTBEAT_MAX_INFLIGHT` (default 900s).
 Due per-task checks run before signal scanning so chatty crewmate status updates cannot starve slow polls like merge detection.
+
+**How long a stopped crew can go unnoticed is a stated number, not an emergent one.**
+Staleness is judged on the pane BODY, never on the harness footer, whose live counters keep ticking on an abandoned pane; the footer is read only for the busy signature.
+The resulting worst cases: a crew whose pane stops claiming busy surfaces within two polls; one absorbed as provably working escalates within `FM_STALE_ESCALATE_SECS` (240s) after that; a crew that dies leaving a busy signature rendered surfaces within `FM_BUSY_CLAIM_MAX` (1800s).
+`docs/incident-2026-07-31-pane-footer-hashing.md` records the measurements and the reasoning behind those bounds.
 
 Never rely on hooks or status files alone; when a heartbeat wake does reach you, the review of every window is mandatory and unconditional.
 Each task's backend live-task inventory is the ground truth (tmux when `backend=` is absent; a task's meta may record a different `backend=` - herdr, zellij, orca, and cmux are the other implemented, spawn-capable, experimental backends today, docs/herdr-backend.md, docs/zellij-backend.md, docs/orca-backend.md, and docs/cmux-backend.md).
