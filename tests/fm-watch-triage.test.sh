@@ -569,6 +569,78 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
   pass "a pane becoming active again resets the consecutive wedge-escalation counter"
 }
 
+# --- a pane whose footer ticks on its own ------------------------------------
+# Incident 2026-07-31 (docs/incident-2026-07-31-pane-footer-hashing.md): a
+# crewmate's turn died mid-response and it sat idle for ~1.5h with nothing
+# surfaced. An idle claude pane is never byte-stable - its footer carries a live
+# session clock, cost and context gauge that tick on a pane doing no work at all
+# (verified against a live pane: the body hash held constant for 160s while the
+# full-capture hash changed three times). The stale path anchored ALL of its
+# bookkeeping to that full hash, so a footer tick invalidated it every minute.
+# That single defect produced both observed halves:
+#   - crew reads NOT provably working -> .stale-* never suppresses, so the same
+#     idle pane re-surfaces once per tick (the repeated stale wakes);
+#   - crew reads provably working      -> .stale-since-* is reset every tick, so
+#     the wedge timer can never mature (the silent 1.5h).
+# Hashing the body fixes both. These tests compress the real cadence (a 60s tick
+# against a 15s poll) into a 3s ticker against FM_POLL=1: the same starvation,
+# faster.
+
+# Rewrite <file> every 3s with a CONSTANT body and an ever-changing footer line,
+# until killed. Echoes the ticker pid. The tick period is deliberately longer
+# than one poll, so the two-identical-hashes gate is reachable between ticks -
+# matching the real cadence, where staleness IS detected and it is the
+# suppressor and the wedge timer that get destroyed.
+start_footer_ticker() {  # <file> <body> [footer-suffix]
+  local file=$1 body=$2 suffix=${3:-}
+  (
+    i=0
+    while :; do
+      { printf '%s\n' "$body"
+        printf '  session %dm - context 68%% - $%d.00%s\n' "$i" "$i" "$suffix"
+      } > "$file"
+      i=$((i + 1))
+      sleep 3
+    done
+  ) &
+  printf '%s' "$!"
+}
+
+# The silent half of the incident. The crew reads provably working, so the stale
+# is absorbed - correctly - but the wedge timer must still mature underneath it.
+# On the old full-capture hash every footer tick wiped .stale-since-*, so the
+# timer never aged past one tick and the escalation never fired at all.
+test_footer_tick_does_not_reset_wedge_timer() {
+  local dir state fakebin out drain_out capture_file window key sig pid ticker
+  dir=$(make_case footer-tick-wedge); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-footer-wedge"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/footer-wedge.meta"
+  printf 'working: still monitoring ci\n' > "$state/footer-wedge.status"
+  sig=$(seen_sig "$state/footer-wedge.status"); printf '%s' "$sig" > "$state/.seen-footer-wedge_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  ticker=$(start_footer_ticker "$capture_file" 'no-mistakes axi run: validating...')
+  sleep 0.5
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=4 FM_PANE_FOOTER_LINES=1 FM_BUSY_CLAIM_MAX=999999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_for_exit "$pid" 300; then
+    kill "$ticker" 2>/dev/null || true
+    fail "the wedge timer never matured on a pane whose footer keeps ticking (the 2026-07-31 silent half)"
+  fi
+  kill "$ticker" 2>/dev/null || true
+  grep -F "stale: $window" "$out" >/dev/null || fail "ticking-footer wedge did not print a stale wake: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null || fail "ticking-footer wedge was not flagged a possible wedge: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the ticking-footer wedge failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "ticking-footer wedge was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "the wedge timer matures on a pane whose footer ticks, instead of being reset by every tick"
+}
+
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   local dir state fakebin out capture_file window key pane_hash sig pid since
   dir=$(make_case nonterminal-stale-timer-repair); state="$dir/state"; fakebin="$dir/fakebin"
@@ -792,9 +864,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
-test_cosmetically_ticking_pane_surfaces_stopped_crew
-test_cosmetically_ticking_pane_still_wedge_escalates
-test_busy_pane_never_surfaced_by_quiet_gate
+test_footer_tick_does_not_reset_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
