@@ -593,6 +593,9 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
 # suppressor and the wedge timer that get destroyed.
 start_footer_ticker() {  # <file> <body> [footer-suffix]
   local file=$1 body=$2 suffix=${3:-}
+  # Detached from the suite's stdio: a background writer that inherits stdout
+  # holds the pipe open, so a piped test run would hang after the assertions
+  # finished instead of reporting.
   (
     i=0
     while :; do
@@ -602,8 +605,15 @@ start_footer_ticker() {  # <file> <body> [footer-suffix]
       i=$((i + 1))
       sleep 3
     done
-  ) &
+  ) </dev/null >/dev/null 2>&1 &
   printf '%s' "$!"
+}
+
+# Stop a ticker started above, scoped to exactly that pid - never a pattern kill,
+# which would reach every firstmate home's processes and not just this test's.
+stop_ticker() {  # <pid>
+  kill "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
 }
 
 # The silent half of the incident. The crew reads provably working, so the stale
@@ -629,10 +639,10 @@ test_footer_tick_does_not_reset_wedge_timer() {
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_for_exit "$pid" 300; then
-    kill "$ticker" 2>/dev/null || true
+    stop_ticker "$ticker"
     fail "the wedge timer never matured on a pane whose footer keeps ticking (the 2026-07-31 silent half)"
   fi
-  kill "$ticker" 2>/dev/null || true
+  stop_ticker "$ticker"
   grep -F "stale: $window" "$out" >/dev/null || fail "ticking-footer wedge did not print a stale wake: $(cat "$out")"
   grep -F "possible wedge" "$out" >/dev/null || fail "ticking-footer wedge was not flagged a possible wedge: $(cat "$out")"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the ticking-footer wedge failed"
