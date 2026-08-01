@@ -36,11 +36,14 @@
 #     reason.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
-#   - Bounded wedge latency: a stale pane is escalated only after it has been
-#     idle for STALE_ESCALATE_SECS (configurable), rechecked once. A wedged
-#     crewmate is therefore detected within STALE_ESCALATE_SECS + a tick, never
-#     lost. Crewmates are autonomous, so a delayed stale response does not stall
-#     a healthy crewmate's own progress.
+#   - Bounded wedge latency: a bare "stale: <window>" first sighting is escalated
+#     only after it has been idle for STALE_ESCALATE_SECS (configurable),
+#     rechecked once. A wedged crewmate is therefore detected within
+#     STALE_ESCALATE_SECS + a tick, never lost. Crewmates are autonomous, so a
+#     delayed stale response does not stall a healthy crewmate's own progress.
+#     A stale reason carrying a parenthesized detail skips that wait: the watcher
+#     attaches one only after its own threshold logic already concluded something
+#     needs a look, and housekeeping's recheck cannot re-derive that verdict.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
 #     writes state/.subsuper-inject-wedged if submit still cannot be confirmed.
@@ -378,8 +381,19 @@ classify_signal() {  # <reason-after-colon> <state>
 # classify_stale decides the WAKE itself (one-shot per distinct hash). On a
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
-classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task last seen
+# A stale reason carrying a detail is different in kind: the watcher emits a bare
+# "stale: <window>" for a raw first sighting, but attaches a detail only after
+# its own threshold logic already concluded something needs a look (a matured
+# wedge timer, or the busy-claim bound on a pane whose signature stands over no
+# output). Housekeeping cannot re-derive that decision - its recheck reads the
+# same rendered signature and drops the marker as "still busy" - so honor the
+# watcher's verdict instead of re-triaging it away.
+classify_stale() {  # <window> <state> [detail]
+  local win=$1 state=$2 detail=${3:-} task last seen
+  if [ -n "$detail" ]; then
+    printf 'escalate|stale: %s (%s)' "$win" "$detail"
+    return
+  fi
   task=$(window_to_task "$win" "$state")
   last=$(last_status_line "$state/$task.status")
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
@@ -795,7 +809,7 @@ is_wake_reason() {  # <reason>
 # Side effects: logging, marker records, escalation buffer appends.
 handle_wake() {  # <reason> <state>
   local reason=$1 state=$2 decision action distilled
-  local kind="" arg=""
+  local kind="" arg="" detail=""
   if should_force_self "$reason"; then
     log "wake force-self (FM_INJECT_SKIP): $reason"
     return
@@ -804,7 +818,14 @@ handle_wake() {  # <reason> <state>
     signal:*) kind=signal; arg="${reason#signal: }"
               decision=$(classify_signal "$arg" "$state") ;;
     stale:*)  kind=stale; arg="${reason#stale: }"
-              decision=$(classify_stale "$arg" "$state") ;;
+              # The watcher's stale reason is "stale: <window>", optionally
+              # followed by a parenthesized detail. Everything downstream -
+              # window_to_task, the status lookup, the .subsuper-stale-<key>
+              # marker - needs the window alone, so split the two apart.
+              case "$arg" in
+                *' ('*) detail="${arg#* (}"; detail="${detail%)}"; arg="${arg%% (*}" ;;
+              esac
+              decision=$(classify_stale "$arg" "$state" "$detail") ;;
     check:*)  decision=$(classify_check "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
     *)        decision=$(classify_unknown "$reason") ;;

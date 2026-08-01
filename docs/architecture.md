@@ -9,9 +9,13 @@ firstmate's full operating manual for the orchestrator agent itself is [`AGENTS.
 ## Event-driven supervision
 
 A zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet, classifies detected wakes in bash, and wakes the first mate only when something is actionable.
-Actionable wakes include captain-relevant status signals, no-verb signals whose crew is not provably working, check-script output such as PR merge polling or an X mention, stale panes whose crew is not provably working whether their status log looks terminal or non-terminal, provably-working stale panes that persist past `FM_STALE_ESCALATE_SECS`, and heartbeat backstop hits.
+Actionable wakes include captain-relevant status signals, no-verb signals whose crew is not provably working, check-script output such as PR merge polling or an X mention, stale panes whose crew is not provably working whether their status log looks terminal or non-terminal, provably-working stale panes that persist past `FM_STALE_ESCALATE_SECS`, panes whose busy signature has stood over a silent body past `FM_BUSY_CLAIM_MAX`, and heartbeat backstop hits.
 Repeated provably-working stale escalations on the same unchanged pane add an escalation count to the wake reason and, at `FM_WEDGE_DEMAND_INSPECT_COUNT`, a `demand-deep-inspection` marker.
 Those actionable wakes are written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed process exit can be recovered by draining the queue.
+Staleness is judged on the pane body - the transcript above the trailing `FM_PANE_FOOTER_LINES` footer block - because a harness footer carries live counters that keep ticking on an abandoned pane; the footer is still read, by the busy check, for the busy signature.
+Because a busy signature is pane-rendered, a session that dies mid-turn can leave one standing, so `FM_BUSY_CLAIM_MAX` bounds how long it may suppress supervision: the wake surfaces once per episode and re-arms as soon as the body moves again or the signature drops.
+The heartbeat backoff widens only for a genuinely idle fleet; while any task is in flight it is capped at `FM_HEARTBEAT_MAX_INFLIGHT` instead of `FM_HEARTBEAT_MAX`, so the fail-safe fleet-scan stays armed during long silent runs.
+Together those make the worst-case notice delay a stated number rather than an emergent property of the backoff; the measurements behind them are in [incident-2026-07-31-pane-footer-hashing.md](incident-2026-07-31-pane-footer-hashing.md).
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step for that crew's branch or a backend busy signature.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or busy pane outranks an old captain-relevant status-log line left behind before validation.
 No-change heartbeats are also benign.
@@ -36,7 +40,8 @@ The hook is scoped out of secondmate homes and crewmate/scout worktrees, allows 
 
 A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill activates it, after which the watcher reverts to daemon-managed one-shot mode and the daemon self-handles routine wakes in bash.
 The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant status verbs and status-scan primitives.
-The always-on watcher also uses that library's provably-working predicate on no-verb signals and first-sighting stale panes before status-log terminality is trusted, while the daemon keeps its away-mode stale recheck unchanged.
+The always-on watcher also uses that library's provably-working predicate on no-verb signals and first-sighting stale panes before status-log terminality is trusted, while the daemon keeps its away-mode stale recheck for a bare `stale: <window>` first sighting.
+A stale reason carrying a parenthesized detail is escalated as-is instead: the watcher attaches one only after its own threshold logic concluded something needs a look (a matured wedge timer, or the busy-claim bound), and the daemon's recheck reads the same rendered signature, so it cannot re-derive that verdict.
 The daemon escalates only captain-relevant events as one batched, single-line digest (prefixed with an in-band sentinel marker so firstmate can tell daemon injections apart from real messages).
 Its supervisor injection path supports tmux and herdr panes, with `FM_SUPERVISOR_BACKEND` and `FM_SUPERVISOR_TARGET` resolved independently from the task-spawn backend.
 Pane existence, busy checks, composer checks, capture, and verified submit route through `bin/fm-backend.sh`: tmux keeps the same submit core used by the tmux send backend, while herdr reuses its native busy state and structural composer classifier.

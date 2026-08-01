@@ -50,6 +50,16 @@ wait_live() {
   return 0
 }
 
+wait_nonempty_file() {
+  local file=$1 limit=${2:-30} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ -s "$file" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 wait_numeric_file() {
   local file=$1 limit=${2:-30} i=0 value
   while [ "$i" -lt "$limit" ]; do
@@ -305,7 +315,7 @@ test_terminal_stale_surfaced() {
   printf 'done: PR https://example.test/pr/3\n' > "$state/done.status"
   sig=$(seen_sig "$state/done.status"); printf '%s' "$sig" > "$state/.seen-done_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  pane_hash=$(hash_text "finished, awaiting review")
+  pane_hash=$(hash_body_text "finished, awaiting review")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -341,7 +351,7 @@ test_stale_terminal_status_overridden_by_active_run() {
   printf 'done: implementation complete, ready to validate\n' > "$state/validating.status"
   sig=$(seen_sig "$state/validating.status"); printf '%s' "$sig" > "$state/.seen-validating_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  pane_hash=$(hash_text "no-mistakes axi run: validating...")
+  pane_hash=$(hash_body_text "no-mistakes axi run: validating...")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
@@ -394,7 +404,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   printf 'working: still compiling\n' > "$state/quiet.status"
   sig=$(seen_sig "$state/quiet.status"); printf '%s' "$sig" > "$state/.seen-quiet_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  pane_hash=$(hash_text "idle building output")
+  pane_hash=$(hash_body_text "idle building output")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   # The crew's pipeline is actively running: a static pane is normal (waiting on CI).
@@ -449,7 +459,7 @@ test_nonterminal_stale_not_working_surfaced() {
   printf 'working: implementing\n' > "$state/stopped.status"
   sig=$(seen_sig "$state/stopped.status"); printf '%s' "$sig" > "$state/.seen-stopped_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  pane_hash=$(hash_text "idle prompt, finished")
+  pane_hash=$(hash_body_text "idle prompt, finished")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   # No running pipeline; the pane is idle. NOT provably working.
@@ -491,7 +501,7 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold() {
   printf 'working: still monitoring ci\n' > "$state/wedged.status"
   sig=$(seen_sig "$state/wedged.status"); printf '%s' "$sig" > "$state/.seen-wedged_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  pane_hash=$(hash_text "idle building output")
+  pane_hash=$(hash_body_text "idle building output")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   # The crew's pipeline is actively running: a static pane is normal (waiting on CI).
@@ -539,34 +549,374 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
   dir=$(make_case wedge-escalation-reset); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
   window="test:fm-wedged-reset"
-  printf 'idle building output' > "$capture_file"
+  # One footer line under FM_PANE_FOOTER_LINES=1, so the seeded hash covers a
+  # real body line. With the default 6 both captures below would have fewer
+  # lines than the footer, collapse to the empty-body hash, and the watcher
+  # would never take the body-change branch this test is about.
+  printf 'idle building output\n  session 1m - context 68%%\n' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedged-reset.meta"
   printf 'working: still monitoring ci\n' > "$state/wedged-reset.status"
   sig=$(seen_sig "$state/wedged-reset.status"); printf '%s' "$sig" > "$state/.seen-wedged-reset_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  pane_hash=$(hash_text "idle building output")
+  pane_hash=$(hash_body_text "$(cat "$capture_file")" 1)
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   # Pre-seed one escalation as if a prior wedge round already fired.
   printf '1\n' > "$state/.wedge-escalations-$key"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
 
-  # The pane content changes (the crew is active again): the hash no longer
-  # matches, so the watcher resets escalation bookkeeping instead of escalating.
-  printf 'new output, crew active again' > "$capture_file"
+  # The crew is active again: its BODY produced new output, and the harness
+  # busy signature stands. A mere change in pane bytes is deliberately NOT
+  # enough (an idle claude pane mints a new hash every minute from its footer
+  # clock alone; see the ticking-pane tests above), which is why the body line
+  # rather than the footer line is what differs here.
+  printf 'new output, crew active again\n  esc to interrupt\n' > "$capture_file"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_PANE_FOOTER_LINES=1 FM_BUSY_CLAIM_MAX=999999 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "watcher exited on a fresh (changed) pane hash: $(cat "$out")"
+    reap "$pid"; fail "watcher exited on a fresh (changed) pane body: $(cat "$out")"
   fi
-  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a changed pane hash did not reset the wedge-escalation counter"
+  # The reset must come from the body-change branch, not from the busy
+  # suppression above it: a fixture whose body collapses to a constant hash
+  # would clear the counter too, and quietly stop testing anything.
+  [ "$(cat "$state/.hash-$key" 2>/dev/null || true)" != "$pane_hash" ] \
+    || fail "the watcher never recorded a new body hash, so this no longer exercises the body-change reset"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a changed pane body did not reset the wedge-escalation counter"
   reap "$pid"
   unset FM_FAKE_CREW_STATE
   pass "a pane becoming active again resets the consecutive wedge-escalation counter"
 }
 
+# --- a pane whose footer ticks on its own ------------------------------------
+# Incident 2026-07-31 (docs/incident-2026-07-31-pane-footer-hashing.md): a
+# crewmate's turn died mid-response and it sat idle for ~1.5h with nothing
+# surfaced. An idle claude pane is never byte-stable - its footer carries a live
+# session clock, cost and context gauge that tick on a pane doing no work at all
+# (verified against a live pane: the body hash held constant for 160s while the
+# full-capture hash changed three times). The stale path anchored ALL of its
+# bookkeeping to that full hash, so a footer tick invalidated it every minute.
+# That single defect produced both observed halves:
+#   - crew reads NOT provably working -> .stale-* never suppresses, so the same
+#     idle pane re-surfaces once per tick (the repeated stale wakes);
+#   - crew reads provably working      -> .stale-since-* is reset every tick, so
+#     the wedge timer can never mature (the silent 1.5h).
+# Hashing the body fixes both. These tests compress the real cadence (a 60s tick
+# against a 15s poll) into a 3s ticker against FM_POLL=1: the same starvation,
+# faster.
+
+# Rewrite <file> every 3s with a CONSTANT body and an ever-changing footer line,
+# until killed. Echoes the ticker pid. The tick period is deliberately longer
+# than one poll, so the two-identical-hashes gate is reachable between ticks -
+# matching the real cadence, where staleness IS detected and it is the
+# suppressor and the wedge timer that get destroyed.
+start_footer_ticker() {  # <file> <body> [footer-suffix]
+  local file=$1 body=$2 suffix=${3:-}
+  # Detached from the suite's stdio: a background writer that inherits stdout
+  # holds the pipe open, so a piped test run would hang after the assertions
+  # finished instead of reporting.
+  (
+    i=0
+    while :; do
+      { printf '%s\n' "$body"
+        printf '  session %dm - context 68%% - $%d.00%s\n' "$i" "$i" "$suffix"
+      } > "$file"
+      i=$((i + 1))
+      sleep 3
+    done
+  ) </dev/null >/dev/null 2>&1 &
+  printf '%s' "$!"
+}
+
+# The opposite fixture: a pane whose BODY changes every second under a constant
+# busy footer - a crew actually producing output. Echoes the ticker pid.
+start_body_ticker() {  # <file>
+  local file=$1
+  (
+    i=0
+    while :; do
+      { printf 'compiling module %d\n' "$i"
+        printf '  session 1m - context 68%% - esc to interrupt\n'
+      } > "$file"
+      i=$((i + 1))
+      sleep 1
+    done
+  ) </dev/null >/dev/null 2>&1 &
+  printf '%s' "$!"
+}
+
+# Stop a ticker started above, scoped to exactly that pid - never a pattern kill,
+# which would reach every firstmate home's processes and not just this test's.
+stop_ticker() {  # <pid>
+  kill "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+}
+
+# The silent half of the incident. The crew reads provably working, so the stale
+# is absorbed - correctly - but the wedge timer must still mature underneath it.
+# On the old full-capture hash every footer tick wiped .stale-since-*, so the
+# timer never aged past one tick and the escalation never fired at all.
+test_footer_tick_does_not_reset_wedge_timer() {
+  local dir state fakebin out drain_out capture_file window key sig pid ticker
+  dir=$(make_case footer-tick-wedge); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-footer-wedge"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/footer-wedge.meta"
+  printf 'working: still monitoring ci\n' > "$state/footer-wedge.status"
+  sig=$(seen_sig "$state/footer-wedge.status"); printf '%s' "$sig" > "$state/.seen-footer-wedge_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  ticker=$(start_footer_ticker "$capture_file" 'no-mistakes axi run: validating...')
+  sleep 0.5
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=4 FM_PANE_FOOTER_LINES=1 FM_BUSY_CLAIM_MAX=999999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_for_exit "$pid" 300; then
+    stop_ticker "$ticker"
+    fail "the wedge timer never matured on a pane whose footer keeps ticking (the 2026-07-31 silent half)"
+  fi
+  stop_ticker "$ticker"
+  grep -F "stale: $window" "$out" >/dev/null || fail "ticking-footer wedge did not print a stale wake: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null || fail "ticking-footer wedge was not flagged a possible wedge: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the ticking-footer wedge failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "ticking-footer wedge was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "the wedge timer matures on a pane whose footer ticks, instead of being reset by every tick"
+}
+
+# The incident's shape end to end: a crew works for an extended stretch, its turn
+# dies mid-response, and the pane goes static at an idle prompt. Supervision must
+# notice within a bounded time - two polls once the body stops moving and the
+# footer stops claiming busy - rather than waiting out a heartbeat backoff.
+test_long_working_stretch_then_death_is_surfaced_promptly() {
+  local dir state fakebin out drain_out capture_file window key sig pid ticker died first_hash
+  dir=$(make_case long-turn-then-death); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-long-turn"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/long-turn.meta"
+  # The task's only status line, written long before: a benign working: note, so
+  # nothing captain-relevant can surface this on the signal path.
+  printf 'working: implementing\n' > "$state/long-turn.status"
+  sig=$(seen_sig "$state/long-turn.status"); printf '%s' "$sig" > "$state/.seen-long-turn_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  ticker=$(start_body_ticker "$capture_file")
+  sleep 0.5
+
+  # FM_PANE_FOOTER_LINES=1 so the ticker's two-line capture actually has a body:
+  # at the default 6 both phases would collapse to the empty-body hash and phase
+  # 1 would pass against a frozen pane too, proving nothing about working crews.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_BUSY_CLAIM_MAX=999999 FM_PANE_FOOTER_LINES=1 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  # Phase 1: the crew is genuinely working. Nothing may surface, however long
+  # this runs - that is the "quiet stretch stays quiet" half of the contract.
+  wait_nonempty_file "$state/.hash-$key" 60 || { stop_ticker "$ticker"; reap "$pid"; fail "the watcher never recorded a body hash"; }
+  first_hash=$(cat "$state/.hash-$key")
+  if ! wait_live "$pid" 80; then
+    stop_ticker "$ticker"
+    fail "a working crew was surfaced during its own turn: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { stop_ticker "$ticker"; reap "$pid"; fail "working phase printed a wake: $(cat "$out")"; }
+  # The working phase has to be a moving body, or it would pass identically
+  # against a frozen pane and the phase would prove nothing.
+  [ "$(cat "$state/.hash-$key" 2>/dev/null || true)" != "$first_hash" ] \
+    || { stop_ticker "$ticker"; reap "$pid"; fail "the working phase's body hash never moved, so it no longer distinguishes a working crew from a frozen pane"; }
+
+  # Phase 2: the turn dies mid-response. The pane freezes at an idle prompt with
+  # no busy signature and everything uncommitted.
+  stop_ticker "$ticker"
+  printf 'API Error: Connection closed mid-response\n> \n  context 68%%\n' > "$capture_file"
+  died=$(date +%s)
+  wait_for_exit "$pid" 200 || fail "a crew whose turn died was never surfaced (the 2026-07-31 incident)"
+  [ "$(( $(date +%s) - died ))" -le 20 ] || fail "the dead crew took longer than the stated two-poll bound to surface"
+  grep -F "stale: $window" "$out" >/dev/null || fail "death was not reported as a stale wake: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the death wake failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "death wake was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a crew that works a long stretch and then dies mid-turn is surfaced within the stated bound"
+}
+
+# The chatty half of the same defect, observed live on 2026-07-31: repeated
+# "stale: <window>" wakes minutes apart for one idle claude pane. When the crew
+# reads NOT provably working the stale is surfaced - correctly, once - but the
+# .stale-* suppressor remembers a hash that the next footer tick invalidates, so
+# the identical idle pane surfaces again on every tick, forever. Body hashing
+# makes the suppressor hold.
+test_footer_tick_surfaces_idle_pane_only_once() {
+  local dir state fakebin out capture_file window key sig pid ticker
+  dir=$(make_case footer-tick-once); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-footer-once"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/footer-once.meta"
+  printf 'working: implementing\n' > "$state/footer-once.status"
+  sig=$(seen_sig "$state/footer-once.status"); printf '%s' "$sig" > "$state/.seen-footer-once_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  ticker=$(start_footer_ticker "$capture_file" 'API Error: Connection closed mid-response')
+  sleep 0.5
+
+  # Round 1: the crew has stopped, so it must surface exactly as it does today.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_PANE_FOOTER_LINES=1 FM_BUSY_CLAIM_MAX=999999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_for_exit "$pid" 200; then
+    stop_ticker "$ticker"; fail "a stopped crew on a ticking-footer pane was not surfaced at all"
+  fi
+  grep -F "stale: $window" "$out" >/dev/null || { stop_ticker "$ticker"; fail "round 1 did not print the stale wake: $(cat "$out")"; }
+
+  # Let the footer tick at least once, then re-arm. The pane is byte-different
+  # but substantively identical, so this must NOT wake firstmate a second time.
+  sleep 4
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_PANE_FOOTER_LINES=1 FM_BUSY_CLAIM_MAX=999999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 80; then
+    stop_ticker "$ticker"
+    fail "the same idle pane re-surfaced after a cosmetic footer tick: $(cat "$out")"
+  fi
+  stop_ticker "$ticker"
+  [ ! -s "$out" ] || { reap "$pid"; fail "round 2 printed a wake reason for an unchanged idle pane: $(cat "$out")"; }
+  reap "$pid"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$(cat "$state/.hash-$key" 2>/dev/null || true)" ] \
+    || fail "the stale suppressor no longer matches the pane body hash, so it will re-fire"
+  unset FM_FAKE_CREW_STATE
+  pass "an idle pane surfaces once, not once per cosmetic footer tick"
+}
+
+# A busy signature is pane-RENDERED, so a session that dies mid-turn can leave it
+# standing with nothing behind it - and while it stands, window_is_busy suppresses
+# the whole triage block, so no .stale-* is ever written and the crew is never
+# classified at all. That is the one branch consistent with the incident's missing
+# .stale-* file. FM_BUSY_CLAIM_MAX bounds it.
+test_busy_claim_is_bounded() {
+  local dir state fakebin out drain_out capture_file window key sig pid
+  dir=$(make_case busy-claim-bound); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-busy-forever"
+  # A frozen transcript under a footer that never stops claiming busy.
+  printf 'running the build...\n  esc to interrupt\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/busy-forever.meta"
+  printf 'working: implementing\n' > "$state/busy-forever.status"
+  sig=$(seen_sig "$state/busy-forever.status"); printf '%s' "$sig" > "$state/.seen-busy-forever_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_CLAIM_MAX=3 FM_PANE_FOOTER_LINES=1 FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 200 || fail "a pane claiming busy with no output was never surfaced (it can suppress supervision forever)"
+  grep -F "stale: $window" "$out" >/dev/null || fail "busy-claim bound did not print a stale wake: $(cat "$out")"
+  grep -F "busy signature standing" "$out" >/dev/null || fail "busy-claim wake did not explain itself: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the busy-claim wake failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "busy-claim wake was not queued"
+  [ -e "$state/.busy-claim-$key" ] || fail "busy-claim episode marker was not recorded (it would re-fire every poll)"
+  unset FM_FAKE_CREW_STATE
+  pass "a rendered busy signature cannot suppress supervision past FM_BUSY_CLAIM_MAX"
+}
+
+# The episode has to be timed from when the busy signature actually started
+# standing, not from the last body output alone. A window that sat idle and NOT
+# busy for longer than the bound has an ancient .body-since-*, so anchoring on
+# that clock alone fires on the first poll of a freshly rendered signature and
+# reports an age the claim never had.
+test_busy_claim_is_timed_from_the_claim_not_the_last_output() {
+  local dir state fakebin out capture_file window key pane_hash sig pid flipped elapsed age
+  dir=$(make_case busy-claim-clock); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-busy-late"
+  # A static body under a footer that is NOT claiming busy yet.
+  printf 'waiting on ci\n  session 40m - context 68%%\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/busy-late.meta"
+  printf 'working: waiting on ci\n' > "$state/busy-late.status"
+  sig=$(seen_sig "$state/busy-late.status"); printf '%s' "$sig" > "$state/.seen-busy-late_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_body_text "$(cat "$capture_file")" 1)
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # The body last moved far longer ago than the bound - the state an idle window
+  # accumulates, since that clock is only refreshed when the body moves.
+  echo $(( $(date +%s) - 9000 )) > "$state/.body-since-$key"
+  # Provably working, so the quiet pane is absorbed and only the busy-claim path
+  # can end this watcher.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_CLAIM_MAX=4 FM_PANE_FOOTER_LINES=1 FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 20 || fail "watcher exited before the busy signature even appeared: $(cat "$out")"
+  # Now the signature appears, on the same unchanged body.
+  printf 'waiting on ci\n  esc to interrupt\n' > "$capture_file"
+  flipped=$(date +%s)
+  wait_for_exit "$pid" 300 || fail "the busy-claim bound never fired once the signature stood past it"
+  elapsed=$(( $(date +%s) - flipped ))
+  [ "$elapsed" -ge 4 ] \
+    || fail "the busy claim fired ${elapsed}s after it appeared, short of FM_BUSY_CLAIM_MAX - it is timed from the wrong clock"
+  age=$(sed -n 's/.*standing \([0-9][0-9]*\)s.*/\1/p' "$out" | head -1)
+  [ -n "$age" ] || fail "busy-claim wake did not report a standing age: $(cat "$out")"
+  [ "$age" -lt 100 ] \
+    || fail "busy-claim wake reported ${age}s, the time since the last body output rather than how long the claim has stood"
+  unset FM_FAKE_CREW_STATE
+  pass "the busy-claim bound is timed from when the signature started standing, not from the last body output"
+}
+
+# The non-chatty half: a crew that is genuinely working prints, so its BODY moves
+# every poll. The busy-claim bound is anchored to body output, so it can never
+# fire on real work however long the run lasts.
+test_working_crew_never_hits_the_busy_claim_bound() {
+  local dir state fakebin out capture_file window sig pid ticker
+  dir=$(make_case busy-claim-working); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-really-working"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/really-working.meta"
+  printf 'working: implementing\n' > "$state/really-working.status"
+  sig=$(seen_sig "$state/really-working.status"); printf '%s' "$sig" > "$state/.seen-really-working_status"
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+  # The BODY changes every second under a constant busy footer: a crew actually
+  # producing output. (Using the footer ticker here would be the wrong fixture -
+  # it varies only the footer, leaving the body constant, which is precisely the
+  # dead-pane-with-a-rendered-busy-signature case the bound is meant to catch.)
+  ticker=$(start_body_ticker "$capture_file")
+  sleep 0.5
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_CLAIM_MAX=3 FM_PANE_FOOTER_LINES=1 FM_STALE_ESCALATE_SECS=3 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 150; then
+    stop_ticker "$ticker"
+    fail "a genuinely working crew was surfaced (blunt surface-everything regression): $(cat "$out")"
+  fi
+  stop_ticker "$ticker"
+  [ ! -s "$out" ] || { reap "$pid"; fail "a working crew printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a working crew enqueued a durable wake record"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a crew whose pane body keeps moving is never surfaced by the busy-claim bound"
+}
+
+# The property under test is that the watcher DOES repair a missing or corrupt
+# timer, not that it does so within any particular number of seconds, so the
+# waits below are budgeted generously. At the original 3s they were one slow
+# watcher startup away from failing, and observed doing exactly that once the
+# ticking-pane cases above were added ahead of them in the run.
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   local dir state fakebin out capture_file window key pane_hash sig pid since
   dir=$(make_case nonterminal-stale-timer-repair); state="$dir/state"; fakebin="$dir/fakebin"
@@ -577,7 +927,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   printf 'working: still compiling\n' > "$state/quiet-timer.status"
   sig=$(seen_sig "$state/quiet-timer.status"); printf '%s' "$sig" > "$state/.seen-quiet-timer_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  pane_hash=$(hash_text "idle building output")
+  pane_hash=$(hash_body_text "idle building output")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   printf '%s' "$pane_hash" > "$state/.stale-$key"
@@ -586,7 +936,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "matching stale suppressor with missing timer did not initialize stale-since"; }
+  wait_numeric_file "$state/.stale-since-$key" 60 || { reap "$pid"; fail "matching stale suppressor with missing timer did not initialize stale-since"; }
   if ! kill -0 "$pid" 2>/dev/null; then
     wait "$pid" 2>/dev/null || true
     fail "watcher exited while repairing a missing stale-since timer: $(cat "$out")"
@@ -600,7 +950,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "matching stale suppressor with corrupt timer did not repair stale-since"; }
+  wait_numeric_file "$state/.stale-since-$key" 60 || { reap "$pid"; fail "matching stale suppressor with corrupt timer did not repair stale-since"; }
   since=$(cat "$state/.stale-since-$key" 2>/dev/null || true)
   [ "$since" != "corrupt" ] || { reap "$pid"; fail "corrupt stale-since value was left in place"; }
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "corrupt stale-since repair enqueued a wake"; }
@@ -663,6 +1013,39 @@ test_heartbeat_no_change_absorbed() {
   [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 1 ] || fail "heartbeat backoff streak did not advance while absorbing"
   reap "$pid"
   pass "a heartbeat with no captain-relevant change is absorbed and backs off the cadence"
+}
+
+# The heartbeat backoff exists so an IDLE fleet stops burning turns. A fleet with
+# work in flight is not idle, so letting the cadence widen to the 2h idle cap
+# there (as it did all through the 2026-07-31 incident, reaching intervals of
+# over two hours) leaves the fail-safe fleet-scan effectively unarmed. With any
+# task in flight the cap is FM_HEARTBEAT_MAX_INFLIGHT instead.
+test_heartbeat_backoff_capped_while_work_in_flight() {
+  local dir state fakebin out pid streak
+  dir=$(make_case heartbeat-inflight-cap); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  # A task in flight, quiet and provably working so nothing else surfaces.
+  printf 'window=%s\nkind=ship\n' "test:fm-inflight" > "$state/inflight.meta"
+  printf 'working: compiling\n' > "$state/inflight.status"
+  printf '%s' "$(seen_sig "$state/inflight.status")" > "$state/.seen-inflight_status"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  # A fully backed-off streak: base * 2^12 is 4096s, far past the idle cap, so
+  # without the in-flight cap no heartbeat is due for over an hour.
+  printf '12\n' > "$state/.heartbeat-streak"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="test:fm-inflight" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_STALE_ESCALATE_SECS=999 \
+    FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=7200 FM_HEARTBEAT_MAX_INFLIGHT=2 "$WATCH" > "$out" &
+  pid=$!
+  sleep 6
+  streak=$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    fail "watcher exited while testing the in-flight heartbeat cap: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ "$streak" -gt 12 ] || fail "heartbeat cadence did not honour FM_HEARTBEAT_MAX_INFLIGHT with a task in flight (streak stayed $streak)"
+  unset FM_FAKE_CREW_STATE
+  pass "with work in flight the heartbeat backoff is capped by FM_HEARTBEAT_MAX_INFLIGHT, not the idle-fleet cap"
 }
 
 test_heartbeat_backstop_surfaces_unsurfaced_status() {
@@ -757,9 +1140,16 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
+test_footer_tick_does_not_reset_wedge_timer
+test_long_working_stretch_then_death_is_surfaced_promptly
+test_footer_tick_surfaces_idle_pane_only_once
+test_busy_claim_is_bounded
+test_busy_claim_is_timed_from_the_claim_not_the_last_output
+test_working_crew_never_hits_the_busy_claim_bound
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
+test_heartbeat_backoff_capped_while_work_in_flight
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
