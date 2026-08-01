@@ -185,6 +185,9 @@ hash_pane() {
 # moves iff the crew is actually producing output. Same constant on both sides,
 # so the two reads cannot drift apart.
 PANE_FOOTER_LINES=${FM_PANE_FOOTER_LINES:-6}
+# A non-numeric override would make `tail -"$PANE_FOOTER_LINES"` fail and silently
+# take the busy read with it, so fall back rather than trust it.
+case "$PANE_FOOTER_LINES" in ''|*[!0-9]*) PANE_FOOTER_LINES=6 ;; esac
 
 # Hash of a capture's body: its non-blank lines minus the trailing footer block.
 # A capture with no more lines than the footer hashes as empty, which is stable -
@@ -329,6 +332,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # printing re-arms cleanly). Deliberately generous - real work prints far more
 # often than this - so it can only ever catch a pane that has actually stopped.
 BUSY_CLAIM_MAX=${FM_BUSY_CLAIM_MAX:-1800}
+case "$BUSY_CLAIM_MAX" in ''|*[!0-9]*) BUSY_CLAIM_MAX=1800 ;; esac
 
 busy_claim_check() {  # <window> <body-since-file> <claim-marker-file>
   local win=$1 since_file=$2 marker=$3 since age reason
@@ -537,7 +541,13 @@ EOF
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified).
+  # Read the recorded window set ONCE per poll: it greps every state/*.meta, and
+  # the heartbeat cadence below needs the same answer to know whether any task is
+  # in flight. A here-doc feeds the loop so it stays in this shell, exactly as the
+  # process substitution did, and an empty set iterates zero times.
+  windows=$(recorded_windows)
   while IFS= read -r w; do
+    [ -n "$w" ] || continue
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, not pane-idle staleness.
     [ "$(window_kind "$w")" = secondmate ] && continue
@@ -653,7 +663,9 @@ EOF
     fi
     # Bound how long a rendered busy signature may suppress everything above.
     [ "$busy" = 1 ] && busy_claim_check "$w" "$bsf" "$bcf"
-  done < <(recorded_windows)
+  done <<EOF
+$windows
+EOF
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
@@ -668,7 +680,7 @@ EOF
   # leaves the fail-safe fleet-scan effectively unarmed for hours (2026-07-31:
   # observed heartbeat gaps of over two hours with a task running). Cap it much
   # tighter whenever any task is recorded in flight.
-  if [ "$hb" -gt "$HEARTBEAT_MAX_INFLIGHT" ] && [ -n "$(recorded_windows)" ]; then
+  if [ "$hb" -gt "$HEARTBEAT_MAX_INFLIGHT" ] && [ -n "$windows" ]; then
     hb=$HEARTBEAT_MAX_INFLIGHT
   fi
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
