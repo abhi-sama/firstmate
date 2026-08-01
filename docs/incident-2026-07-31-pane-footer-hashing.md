@@ -92,9 +92,10 @@ In `bin/fm-watch.sh`:
   The footer is still read, by `window_is_busy`, for the busy signature; that is what it is for.
   Both sides share `PANE_FOOTER_LINES` so they cannot drift apart.
   A footer tick is no longer mistaken for progress, so the suppressor holds and the wedge timer matures.
-- `FM_BUSY_CLAIM_MAX` (default 1800s) bounds how long a rendered busy signature may suppress supervision: a pane still claiming busy whose body has produced no output for that long surfaces once per episode, and the episode re-arms the moment the body moves again.
+- `FM_BUSY_CLAIM_MAX` (default 1800s) bounds how long a rendered busy signature may suppress supervision: a pane still claiming busy whose body has produced no output for that long surfaces once per episode, and the episode re-arms the moment the body moves again or the signature drops.
+  The episode is timed from the later of two clocks, `.body-since-*` and `.busy-since-*`, because both halves of the claim have to have held: the body clock alone is only refreshed on body movement, so a window that sat idle and not busy for longer than the bound would trip it on the first poll of a signature that had just appeared.
 - `FM_HEARTBEAT_MAX_INFLIGHT` (default 900s) caps the heartbeat backoff whenever any task is in flight.
-  The 2h cap remains for a genuinely idle fleet.
+  The 2h cap remains for a genuinely idle fleet, and a persistent secondmate does not count as work in flight - it is retired only on explicit teardown, so counting it would put the idle cap permanently out of reach in any home that has one.
 
 ## Stated bounds
 
@@ -104,7 +105,7 @@ The point of the fix is that the worst-case notice delay is a known number rathe
 | --- | --- |
 | Crew stops and its pane stops claiming busy, crew not provably working | 2 polls (~30s at the default `FM_POLL`) |
 | Crew stops, absorbed as provably working | `FM_STALE_ESCALATE_SECS` (240s) after that |
-| Crew dies leaving a busy signature rendered | `FM_BUSY_CLAIM_MAX` (1800s) |
+| Crew dies leaving a busy signature rendered | `FM_BUSY_CLAIM_MAX` (1800s) from the poll that first reads the standing claim |
 | Fail-safe fleet-scan while any task is in flight | `FM_HEARTBEAT_MAX_INFLIGHT` (900s) |
 
 ## Regression coverage
@@ -118,10 +119,13 @@ Each test below was run against the pre-fix `bin/fm-watch.sh` (`ce0589e`) and ag
 | `test_footer_tick_does_not_reset_wedge_timer` | fails | passes | reproduces the silent half |
 | `test_footer_tick_surfaces_idle_pane_only_once` | fails | passes | reproduces the chatty half |
 | `test_busy_claim_is_bounded` | fails | passes | reproduces the rendered-busy branch |
+| `test_busy_claim_is_timed_from_the_claim_not_the_last_output` | fails | passes | reproduces the wrong-clock episode timing |
 | `test_long_working_stretch_then_death_is_surfaced_promptly` | passes | passes | guard only |
 | `test_working_crew_never_hits_the_busy_claim_bound` | n/a | passes | non-chatty guard |
 | `test_wedge_escalation_resets_when_pane_becomes_active` | n/a | passes | non-chatty guard |
 | `test_heartbeat_backoff_capped_while_work_in_flight` | n/a | passes | in-flight cadence cap |
+
+The wrong-clock row was A/B'd against `991625b` rather than `ce0589e`, since it covers the episode timing of the bound this branch itself introduced: there the claim fired 0s after the signature appeared and reported the ~9000s since the last body output.
 
 Exact output for the first one:
 
