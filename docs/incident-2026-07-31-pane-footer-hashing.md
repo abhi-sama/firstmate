@@ -122,6 +122,7 @@ ok - the wedge timer matures on a pane whose footer ticks, instead of being rese
 FIXED_EXIT=0
 ```
 
+- `test_long_working_stretch_then_death_is_surfaced_promptly` - the incident shape end to end: nothing surfaces while the crew works, and the death surfaces within the two-poll bound.
 - `test_footer_tick_surfaces_idle_pane_only_once` - the chatty half.
 - `test_busy_claim_is_bounded` - the rendered-busy branch.
 - `test_working_crew_never_hits_the_busy_claim_bound` and `test_wedge_escalation_resets_when_pane_becomes_active` - the non-chatty guard, so the fix cannot degrade into surfacing everything.
