@@ -51,6 +51,18 @@ jobs:
           set -eu
           [ "$(readlink CLAUDE.md)" = "AGENTS.md" ] || { echo "::error::CLAUDE.md must be a symlink to AGENTS.md"; exit 1; }
           [ "$(readlink .claude/skills)" = "../.agents/skills" ] || { echo "::error::.claude/skills must be a symlink to ../.agents/skills"; exit 1; }
+      - name: Test scripts must stay executable
+        run: |
+          set -eu
+          # The tests job runs each script directly, so a non-executable one dies
+          # with "Permission denied" and aborts the whole loop. Assert the tracked
+          # mode, not the filesystem bit, so this holds wherever git is checked out.
+          nonexec=$(git ls-files -s -- 'tests/*.test.sh' | awk '$1 != "100755" { print $4 }')
+          if [ -n "$nonexec" ]; then
+            echo "::error::Test scripts must be tracked as executable (100755):"
+            printf '%s\n' "$nonexec"
+            exit 1
+          fi
       - name: Personal fleet paths must not be tracked
         run: |
           set -eu

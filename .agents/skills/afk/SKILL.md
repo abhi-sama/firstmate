@@ -184,7 +184,11 @@ the marker lets firstmate distinguish it from a real captain message.
   pending. Without these filters, idle bordered composers and dim ghost
   suggestions can look like pending input and stall supervision. `FM_COMPOSER_IDLE_RE`
   still overrides empty-composer matching after dim-ghost and border stripping,
-  and `FM_BUSY_REGEX` overrides busy footers.
+  and `FM_BUSY_REGEX` overrides busy footers, with `FM_BUSY_TAIL_LINES` overriding
+  how many trailing lines that scan reads. Both busy defaults live once in
+  `bin/fm-tmux-lib.sh`, and the daemon reads them through the same shared
+  `fm_tail_is_busy` scan as the watcher, so its verdicts cannot drift from the
+  watcher's (`docs/harness-busy-signatures.md`).
 - **Max-defer escape** - the daemon must never silently wedge. If anything stays
   buffered past `FM_MAX_DEFER_SECS` (default 300s), the daemon attempts one
   normal flush, which still requires an idle pane and empty composer. If that

@@ -90,7 +90,12 @@
 #                                   (default 300)
 #          FM_HOUSEKEEPING_TICK     seconds between housekeeping passes while
 #                                   the watcher is mid-cycle (default 15)
-#          FM_BUSY_REGEX            OR-ed busy signatures (mirrors fm-watch.sh)
+#          FM_BUSY_REGEX            OR-ed busy signatures; overrides the one set
+#                                   defined in bin/fm-tmux-lib.sh and shared with
+#                                   fm-watch.sh and fm-crew-state.sh
+#          FM_BUSY_TAIL_LINES       trailing non-blank lines scanned for that
+#                                   signature (default 8; see
+#                                   docs/harness-busy-signatures.md)
 #          FM_COMPOSER_IDLE_RE      empty-composer regex applied after dim-ghost
 #                                   and structural border stripping (default:
 #                                   bare prompt glyphs plus busy footers)
@@ -166,8 +171,10 @@ MAX_DEFER_SECS_DEFAULT=300
 # status_is_captain_relevant, window_to_task, scan_captain_relevant_statuses) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
 # Composer-empty detection and the tmux busy-footer fallback live in
-# bin/fm-tmux-lib.sh (FM_TMUX_BUSY_REGEX_DEFAULT / fm_tmux_composer_state);
-# FM_BUSY_REGEX still overrides the fallback busy set here, as before.
+# bin/fm-tmux-lib.sh (fm_tail_is_busy over FM_TMUX_BUSY_REGEX_DEFAULT and
+# FM_TMUX_BUSY_TAIL_DEFAULT / fm_tmux_composer_state). The daemon's own busy
+# reads route through that one shared scan, so they cannot drift from the
+# watcher's; FM_BUSY_REGEX still overrides the fallback busy set here, as before.
 INJECT_FAIL_SLEEP_DEFAULT=30
 INJECT_CONFIRM_RETRIES_DEFAULT=3
 INJECT_CONFIRM_SLEEP_DEFAULT=0.5
@@ -509,8 +516,7 @@ pane_is_busy() {  # <target> [backend]
     busy) return 0 ;;
   esac
   tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
-    | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
+  fm_tail_is_busy "$tail40"
 }
 
 # pane_input_pending: dispatches through fm_backend_composer_state, which for
@@ -537,8 +543,7 @@ stale_window_is_busy() {  # <window> <state>
   case "$bs" in
     busy) return 0 ;;
   esac
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
-    | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
+  fm_tail_is_busy "$tail40"
 }
 
 escalate_add() {  # <state> <distilled-item>

@@ -76,5 +76,6 @@ Firstmate adds this skill's load instruction to firstmate-repo briefs by hand in
 - Run `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` before treating a script change as done.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
 - A backend-verification doc (`docs/*-backend.md`) records empirical facts, not assumptions.
+- A harness busy signature is the same kind of fact and drifts silently when the harness updates its UI: change it only through the re-measurement procedure in `docs/harness-busy-signatures.md`, keep it defined once in `bin/fm-tmux-lib.sh`, and land the captured pane text as a both-directions fixture pair in `tests/fm-busy-signature.test.sh`.
 - Include the date, version, exact commands run, and exact output.
 - Write incidents the same way, as evidence, not narrative alone.

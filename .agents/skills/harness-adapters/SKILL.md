@@ -30,7 +30,7 @@ The supervision knowledge lives here: busy signature, exit command, interrupt, d
 
 Never dispatch a crewmate or secondmate on an unverified adapter.
 If `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, tell the captain and fall back to firstmate's own harness until that adapter is verified.
-If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override, and the verified knowledge here.
+If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in the single `FM_TMUX_BUSY_REGEX_DEFAULT` definition in `bin/fm-tmux-lib.sh` (with a fixture pair in `tests/fm-busy-signature.test.sh`, per `docs/harness-busy-signatures.md`), any needed `FM_COMPOSER_IDLE_RE` empty-composer override, and the verified knowledge here.
 
 ## Detection
 
@@ -77,11 +77,19 @@ Natural language is acceptable if uncertain.
 
 | Fact | Value |
 |---|---|
-| Busy-pane signature | `esc to interrupt` |
+| Busy-pane signature | the streaming token counter on the spinner line, e.g. `↓ 24.1k tokens` (re-verified 2026-08-03, Opus 5); older builds emitted `esc to interrupt`, which the signature still matches |
 | Exit command | `/exit` |
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
 | Resume | `claude --continue` resumes the most recent session in the current directory; `claude --resume <session-id>` resumes a specific session |
+
+**Busy signature (re-verified 2026-08-03, Opus 5, tmux).**
+Current claude builds render no `esc to interrupt` footer at all.
+A turn in flight shows a spinner line instead, e.g. `✶ Wandering… (12m 26s · ↓ 24.1k tokens)`.
+The verb is randomised and the leading glyph rotates, so neither may be matched; the streaming token counter is the discriminator.
+It must never be an elapsed timer, because a finished pane renders its own (`✻ Worked for 26m 21s`) and the always-present status line carries one too.
+The counter counts only inside the parenthesised elapsed-time frame the harness draws around it, never bare on the line, because the scan window reaches past the footer into pane body where prose can mention a token count.
+This is the harness fact only: the regex itself is defined once in `bin/fm-tmux-lib.sh`, and `docs/harness-busy-signatures.md` records how to re-measure it when a harness update moves the signature again.
 
 First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
 After every spawn, peek the pane within about 20 seconds.
