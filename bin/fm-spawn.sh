@@ -92,6 +92,44 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: fm-spawn.sh <task-id> <project-dir> [options]
+       fm-spawn.sh <task-id> [<firstmate-home>] [options] --secondmate
+       fm-spawn.sh <id1>=<project-dir1> <id2>=<project-dir2> ... [options]
+
+Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
+secondmate in its isolated firstmate home. The third form is batch dispatch.
+
+Options:
+  --harness <name>   claude|codex|opencode|pi|grok, or a raw launch command
+                     (a non-flag string containing whitespace). Also accepted
+                     positionally. Required for crewmate/scout spawns while
+                     config/crew-dispatch.json exists.
+  --model <name>     Concrete model for the selected harness.
+  --effort <level>   low|medium|high|xhigh|max.
+  --backend <name>   tmux (reference) | herdr | zellij | orca | cmux.
+                     Default: FM_BACKEND, then config/backend, then runtime
+                     auto-detection, then tmux.
+  --scout            Scout task (records kind=scout; worktree is scratch).
+  --secondmate       Launch a secondmate in its firstmate home.
+  -h, --help         Print this help and exit.
+
+See the comment header of this script and AGENTS.md section 7 for the full
+contract.
+EOF
+}
+
+# --help must work regardless of fleet state, so answer it before the watcher
+# guard runs and before any positional is dereferenced (`--help` is not an
+# option below, so it would otherwise land in POS and read POS[1] unbound).
+for a in "$@"; do
+  case "$a" in
+    -h|--help) usage; exit 0 ;;
+  esac
+done
+
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -260,6 +298,8 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   done
   exit "$rc"
 fi
+# Missing positionals are a usage error, not an unbound-variable crash.
+[ "${#POS[@]}" -gt 0 ] || { echo "error: <task-id> is required" >&2; usage >&2; exit 1; }
 ID=${POS[0]}
 PROJ=
 ARG3=
@@ -284,6 +324,7 @@ if [ "$KIND" = secondmate ]; then
       ;;
   esac
 else
+  [ "${#POS[@]}" -gt 1 ] || { echo "error: <project-dir> is required for a ${KIND} spawn" >&2; usage >&2; exit 1; }
   PROJ=${POS[1]}
   ARG3=${POS[2]:-}
 fi

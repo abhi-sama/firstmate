@@ -34,10 +34,70 @@
 # All functions are `set -u` and `set -e` safe (guarded tmux calls, explicit
 # returns) so they can be sourced into either context.
 
-# Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
-# (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
+# Busy footers per harness, OR-ed. This is the ONE definition; fm-watch.sh,
+# fm-crew-state.sh and the away-mode daemon all read it from here.
+#
+# Each alternative is an EMPIRICALLY VERIFIED per-harness fact that drifts when
+# the harness updates its UI, so each records what it was measured against.
+# codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
+# grok: "Ctrl+c:cancel" (grok's mid-turn cancel hint, shown iff a turn is
+# running - verified grok 0.2.73). Older claude builds emitted "esc to
+# interrupt" too, so that alternative stays for them.
+#
+# claude (verified 2026-08-03, Opus 5, tmux): current builds render NO
+# "esc to interrupt" footer. A turn in flight shows a spinner line instead:
+#   ✶ Wandering… (12m 26s · ↓ 24.1k tokens)
+# The verb is RANDOMISED ("Wandering", "Hyperspacing", "Whatchamacalliting",
+# "Gitifying", "Brewed"…) and the leading glyph rotates (· ✢ ✳ ✶ ✻ ✽), so
+# NEITHER may be matched. The discriminator is the streaming TOKEN COUNTER
+# ("↓ 24.1k tokens"), never the elapsed timer: a FINISHED pane renders its own
+# timer ("✻ Worked for 26m 21s", "✻ Cooked for 35s") and the always-present
+# status line carries one too ("· 12m25s ·"), so matching a timer would match
+# an idle pane. The token counter appeared in all 43 sampled busy footers and
+# in none of the idle ones. "(ctrl+b ctrl+b" is claude's run-in-background hint,
+# rendered only under an in-flight tool call.
+#
+# The asymmetry that governs every edit here: missing a busy pane costs one
+# spurious wake, but matching an IDLE pane makes the watcher absorb a stopped
+# crewmate forever (AGENTS.md section 8). So never add anything the idle footer
+# renders - the "❯" prompt, the model/branch/context line, or "⏵⏵ bypass
+# permissions" - and never add a bare "esc"/"cancel", which both the trust
+# dialog ("Enter to confirm · Esc to cancel") and the mid-turn permission dialog
+# ("Esc to cancel · Tab to amend") render while genuinely waiting on a human.
+# Re-measure with tests/fm-busy-signature.test.sh's fixtures; docs/harness-busy-signatures.md
+# records how to recapture them.
+FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|(↓|↑)[[:space:]]*[0-9][0-9.,]*[km]?[[:space:]]+tokens|\(ctrl\+b ctrl\+b'
+
+# How many trailing non-blank lines the busy scan reads.
+#
+# claude's steady-state footer is 6 rows (spinner, rule, composer, rule, status,
+# mode), which put the spinner on row 6 and made 6 the historical window. But
+# claude also renders PERSISTENT notice rows directly under the spinner - a
+# "/desktop" or "/rename" tip, a plugin-update or login-expiry banner - and each
+# one pushes the spinner further out of a 6-row window. Measured 2026-08-03,
+# THREE of four live crewmates carried such a banner at once, so at 6 rows the
+# fixed regex still read them all as not busy: the banner case is the common
+# case, not an edge case.
+#
+# 8 covers a spinner displaced by up to two notice rows. It is deliberately
+# NOT fm-watch.sh's PANE_FOOTER_LINES, which stays 6 because it answers a
+# different question - which rows tick on their own and so must be excluded
+# from the stale BODY hash. Widening that one instead would drop real
+# transcript rows out of the hash and blunt stale detection.
+FM_TMUX_BUSY_TAIL_DEFAULT=8
+
+# fm_tail_is_busy: 0 iff an already-captured pane tail shows a busy signature.
+# The ONE implementation of the scan; fm_pane_is_busy, fm-watch.sh,
+# fm-crew-state.sh and the away-mode daemon all route through it, so the window
+# and the regex cannot drift between the five call sites that used to inline it.
+# A non-numeric or zero FM_BUSY_TAIL_LINES override falls back rather than
+# silently matching nothing, the same guard fm-watch.sh applies to its own.
+fm_tail_is_busy() {  # <captured-tail>
+  local n=${FM_BUSY_TAIL_LINES:-$FM_TMUX_BUSY_TAIL_DEFAULT}
+  case "$n" in ''|0|*[!0-9]*) n=$FM_TMUX_BUSY_TAIL_DEFAULT ;; esac
+  printf '%s' "$1" | grep -v '^[[:space:]]*$' | tail -"$n" \
+    | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
+}
 
 # fm_tmux_strip_ghost: remove dim/faint (ANSI SGR 2) styled runs from one captured
 # composer line, then drop any remaining escape sequences, leaving only the plain,
@@ -160,8 +220,7 @@ fm_pane_input_pending() {  # <target>
 fm_pane_is_busy() {  # <target>
   local win=$1 tail40
   tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
-    | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
+  fm_tail_is_busy "$tail40"
 }
 
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,

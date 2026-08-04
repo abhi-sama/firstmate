@@ -63,6 +63,11 @@ mkdir -p "$STATE"
 # see bin/fm-backend.sh and docs/herdr-backend.md.
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# The busy-signature set (FM_TMUX_BUSY_REGEX_DEFAULT). Sourced rather than
+# restated: this watcher used to carry its own copy of the literal, so a fix to
+# one was not a fix to the other.
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$SCRIPT_DIR/fm-tmux-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -119,12 +124,11 @@ CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
-# Busy signatures per harness, OR-ed. Extend via env when new adapters are verified.
-# claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
-# grok: "Ctrl+c:cancel" (the mid-turn cancel hint in grok's keybind bar, shown iff a
-# turn is running; absent when idle - verified grok 0.2.73, ASCII to avoid the
-# locale fragility of matching grok's braille spinner glyph directly).
-BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
+# Busy signatures per harness, OR-ed. Extend via env when new adapters are
+# verified. The set itself is defined once in bin/fm-tmux-lib.sh, which records
+# what each alternative was measured against and why an idle-matching addition
+# would be far worse than a missed busy pane.
+BUSY_REGEX=${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}
 # Always-on wake triage: most wakes during a long crew validation are benign (a
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
 # than wake firstmate's LLM for each, this watcher classifies every wake in bash
@@ -172,24 +176,27 @@ hash_pane() {
 }
 
 # The pane FOOTER is the trailing block of non-blank lines where every verified
-# harness renders its status line. Two different things live there and they must
-# be read differently. window_is_busy scans it for the busy indicator, which is
-# what it is for. But it also carries live counters - claude renders a session
-# clock, a running cost and a context gauge - that keep moving on a pane doing NO
-# work at all (verified 2026-07-31 against a live idle pane:
+# harness renders its status line. It carries live counters - claude renders a
+# session clock, a running cost and a context gauge - that keep moving on a pane
+# doing NO work at all (verified 2026-07-31 against a live idle pane:
 # docs/incident-2026-07-31-pane-footer-hashing.md). Hashing them made an abandoned
 # pane indistinguishable from a working one, so its .stale-*/.count-* bookkeeping
 # was invalidated on every tick: the same idle pane re-surfaced once per tick,
 # and its wedge timer was reset before it could ever mature. The stale hash
 # therefore covers the pane BODY only - the transcript above the footer, which
-# moves iff the crew is actually producing output. Same constant on both sides,
-# so the two reads cannot drift apart.
+# moves iff the crew is actually producing output.
+#
+# This constant answers ONLY that question: which trailing rows tick on their own
+# and must stay out of the body hash. The busy scan is deliberately a separate,
+# wider window (FM_TMUX_BUSY_TAIL_DEFAULT in bin/fm-tmux-lib.sh), because claude
+# can push its spinner out of the 6-row footer with persistent notice banners.
+# The two were one constant until 2026-08-03, when sharing it meant the busy read
+# could not be widened without also dropping real transcript rows out of the hash.
 PANE_FOOTER_LINES=${FM_PANE_FOOTER_LINES:-6}
-# A non-numeric override would make `tail -"$PANE_FOOTER_LINES"` fail and silently
-# take the busy read with it, so fall back rather than trust it. Zero is rejected
-# for the opposite reason: it is valid syntax that silently reinstates the very
-# defect this split exists to fix - `tail -0` matches no busy signature at all,
-# and a zero-line footer leaves the ticking counters inside the body hash.
+# A non-numeric override would make the `tail` below fail, so fall back rather
+# than trust it. Zero is rejected for the opposite reason: it is valid syntax
+# that silently leaves the ticking counters inside the body hash, reinstating
+# the very defect this split exists to fix.
 case "$PANE_FOOTER_LINES" in ''|0|*[!0-9]*) PANE_FOOTER_LINES=6 ;; esac
 
 # Hash of a capture's body: its non-blank lines minus the trailing footer block.
@@ -216,7 +223,7 @@ window_is_busy() {  # <window> <tail40>
     busy) return 0 ;;
     idle) return 1 ;;
     *)
-      printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -"$PANE_FOOTER_LINES" | grep -qiE "$BUSY_REGEX"
+      FM_BUSY_REGEX="$BUSY_REGEX" fm_tail_is_busy "$tail40"
       ;;
   esac
 }
