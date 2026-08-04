@@ -202,6 +202,38 @@ EOF
   pass "a token counter outside the spinner's parenthesised frame reads NOT BUSY"
 }
 
+test_run_in_background_hint_alone_is_not_busy() {
+  local f
+  # claude's run-in-background hint is NOT part of the signature. It is a bare
+  # literal that appears verbatim in this file and in
+  # docs/harness-busy-signatures.md, so a crewmate doing firstmate self-work
+  # that ends its turn displaying either one would read busy while stopped, and
+  # the watcher would absorb it. The busy fixtures above carry this same hint
+  # line and still read BUSY via the anchored counter on the spinner line below
+  # it, which is the proof that dropping it costs no detection.
+  f=$(fixture idle-body-run-in-background <<'EOF'
+⏺ Read(tests/fm-busy-signature.test.sh)
+  ⎿       (ctrl+b ctrl+b (twice) to run in background)
+✻ Worked for 4m 11s
+────────────────────────────────────────
+❯
+────────────────────────────────────────
+  Opus 5 · effort:high · firstmate  ⎇ fm/busy-signature-claude-v9 · ██░░░░░░░░ 21% (210k/1M) · 18m
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 5 agents
+EOF
+)
+  [ "$(is_busy "$f")" = "NOT BUSY" ] \
+    || fail "a stopped crewmate displaying the run-in-background hint read as busy - the watcher would absorb it"
+
+  # The hint on its own, as it appears when the fixture file is simply on screen.
+  f=$(fixture idle-run-in-background-only <<'EOF'
+     (ctrl+b ctrl+b (twice) to run in background)
+EOF
+)
+  [ "$(is_busy "$f")" = "NOT BUSY" ] || fail "the run-in-background hint matched the busy signature on its own"
+  pass "claude's run-in-background hint never reads BUSY on its own"
+}
+
 test_busy_window_is_wider_than_the_body_hash_split() {
   # The busy window and fm-watch.sh's PANE_FOOTER_LINES answer different
   # questions and must stay separate constants; sharing one is what made the
@@ -393,6 +425,7 @@ test_spinner_verb_and_glyph_are_not_matched
 test_spinner_displaced_by_notice_banner_is_busy
 test_finished_pane_with_notice_banner_is_not_busy
 test_bare_token_counter_in_the_body_is_not_busy
+test_run_in_background_hint_alone_is_not_busy
 test_busy_window_is_wider_than_the_body_hash_split
 test_busy_tail_override_is_guarded
 test_legacy_and_other_harness_signatures_still_match

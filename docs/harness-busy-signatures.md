@@ -90,10 +90,18 @@ The match requires an open paren, a digit-led elapsed token, then the arrow, a n
 
 That frame is **structural**, drawn by the harness, and prose that merely mentions a token count does not reproduce it.
 The line "the streaming token counter (`↓ 24.1k tokens`) was present in all 43", a few lines above in this very document, does not match, and neither does a transcript row quoting `↓ 24.1k tokens` on its own.
-**This is what makes a scan window wider than the footer safe**, because rows past the steady-state footer are pane body rather than chrome.
+**This is what makes a scan window wider than the footer tolerable for the claude alternative**, because rows past the steady-state footer are pane body rather than chrome.
 
-Be honest about the limit: this narrows the false-positive surface rather than eliminating it.
+Be honest about the limit, in two directions.
+
+First, the frame anchor narrows the false-positive surface rather than eliminating it.
 Verbatim pane text pasted into a transcript can still carry a complete frame, and a stopped crewmate whose body ends in one would read busy.
+
+Second, the anchor hardens **only** the claude alternative.
+The window widening applies to the whole OR-ed set, so `esc (to )?interrupt`, `Working...` and `Ctrl+c:cancel` are now also scanned across the two rows of pane body past the footer, and all three remain bare substrings.
+Each appears verbatim in the "Other harnesses" table below, and in any `bin/fm-peek.sh` output of another crewmate's pane.
+So the widened window is **not safe by construction**; the anchor buys back the surface it opened for one alternative, and the rest are unanchored.
+
 The bounded backstops remain the safety net for that residue: a provably-working pane still escalates at `FM_STALE_ESCALATE_SECS` (240s), and a standing busy signature over a silent body surfaces at `FM_BUSY_CLAIM_MAX` (1800s).
 
 The finished pane renders its own elapsed timer, with no parentheses and no token counter:
@@ -114,7 +122,11 @@ Both human-blocked states were captured and neither carries a token counter, so 
  Enter to confirm · Esc to cancel                      (trust dialog)
 ```
 
-`(ctrl+b ctrl+b` is claude's run-in-background hint, rendered only under an in-flight tool call, and is matched as a secondary anchor.
+`(ctrl+b ctrl+b (twice) to run in background)` is claude's run-in-background hint, rendered only under an in-flight tool call.
+It is deliberately **not** matched.
+It is a bare literal that appears verbatim in this repo's own tests and docs, so a pane merely displaying one of those files would read busy - the catastrophic direction.
+Dropping it costs no detection: the hint always renders directly **above** the spinner line, so it can only fall inside the last-`FM_TMUX_BUSY_TAIL_DEFAULT`-lines window when the anchored counter below it already matches.
+That was confirmed against every live busy pane sampled on 2026-08-03, including one mid-tool-call.
 
 ### Footer height, notice banners, and the scan window
 
@@ -139,8 +151,8 @@ Measured 2026-08-03, **three of four** live crewmates carried such a banner simu
 ```
 
 The window is therefore `FM_TMUX_BUSY_TAIL_DEFAULT` (8), which covers a spinner displaced by up to two notice rows.
-Rows 7 and 8 of that window are pane **body**, not footer, so the width is only safe in company with the parenthesised-frame anchor above.
-The two are complementary: the width buys margin against composers and notice banners that push the spinner up, and the anchor removes the false-positive surface that margin would otherwise open.
+Rows 7 and 8 of that window are pane **body**, not footer, so the width is only tolerable in company with the parenthesised-frame anchor above.
+The two are complementary: the width buys margin against composers and notice banners that push the spinner up, and the anchor buys back the false-positive surface that margin opens - for the claude alternative only, as the honesty note above records.
 
 **It is deliberately not `PANE_FOOTER_LINES`**, which stays 6 in `bin/fm-watch.sh`.
 Those two constants answer different questions.

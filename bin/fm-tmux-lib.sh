@@ -54,16 +54,24 @@
 # timer ("✻ Worked for 26m 21s", "✻ Cooked for 35s") and the always-present
 # status line carries one too ("· 12m25s ·"), so matching a timer would match
 # an idle pane. The token counter appeared in all 43 sampled busy footers and
-# in none of the idle ones. "(ctrl+b ctrl+b" is claude's run-in-background hint,
-# rendered only under an in-flight tool call.
+# in none of the idle ones.
+#
+# claude's run-in-background hint ("(ctrl+b ctrl+b (twice) to run in
+# background)") is deliberately NOT matched: it is a bare literal that appears
+# VERBATIM in this repo's own tests and docs, so a pane merely DISPLAYING those
+# files would read busy. Nothing is lost by dropping it - the hint always
+# renders directly ABOVE the spinner line, so it can only fall inside the
+# window when the anchored counter below it already matches.
 #
 # The counter is anchored INSIDE the spinner's parenthesised elapsed-time frame
 # ("(<digit-led elapsed> … ↓ <n> tokens"), never matched bare anywhere on the
 # line. That frame is structural: prose mentioning a token count - including
-# this repo's own docs and fixtures - does not reproduce it, which is what makes
-# a scan window wider than the footer safe. It narrows the false-positive
-# surface rather than eliminating it, since verbatim pane text pasted into a
-# transcript can still carry a complete frame; FM_STALE_ESCALATE_SECS (240s) and
+# this repo's own docs and fixtures - does not reproduce it. That anchor hardens
+# ONLY the claude alternative; the three legacy alternatives above stay bare
+# substrings and are now scanned across pane body rows too, so the widened
+# window is not safe by construction. It narrows the false-positive surface
+# rather than eliminating it, since verbatim pane text pasted into a transcript
+# can still carry a complete frame; FM_STALE_ESCALATE_SECS (240s) and
 # FM_BUSY_CLAIM_MAX (1800s) remain the bounded backstops for that residue.
 #
 # The asymmetry that governs every edit here: missing a busy pane costs one
@@ -75,7 +83,7 @@
 # ("Esc to cancel · Tab to amend") render while genuinely waiting on a human.
 # Re-measure with tests/fm-busy-signature.test.sh's fixtures; docs/harness-busy-signatures.md
 # records how to recapture them.
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|\([0-9][^)]*(↓|↑)[[:space:]]*[0-9][0-9.,]*[km]?[[:space:]]+tokens|\(ctrl\+b ctrl\+b'
+FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|\([0-9][^)]*(↓|↑)[[:space:]]*[0-9][0-9.,]*[km]?[[:space:]]+tokens'
 
 # How many trailing non-blank lines the busy scan reads.
 #
@@ -89,9 +97,11 @@ FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|\([
 # case, not an edge case.
 #
 # 8 covers a spinner displaced by up to two notice rows. Rows past the 6-row
-# footer are pane BODY, so the widened window is safe only because the claude
-# alternative is anchored to the parenthesised spinner frame above; the two are
-# complementary, not alternatives. It is deliberately
+# footer are pane BODY, so the width is only tolerable in company with the
+# parenthesised-frame anchor above; the two are complementary, not
+# alternatives. The anchor hardens the claude alternative alone - the legacy
+# ones stay bare - so treat the widened window as narrowed risk, not proof of
+# safety. It is deliberately
 # NOT fm-watch.sh's PANE_FOOTER_LINES, which stays 6 because it answers a
 # different question - which rows tick on their own and so must be excluded
 # from the stale BODY hash. Widening that one instead would drop real
