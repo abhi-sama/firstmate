@@ -88,6 +88,7 @@ Current claude builds render no `esc to interrupt` footer at all.
 A turn in flight shows a spinner line instead, e.g. `✶ Wandering… (12m 26s · ↓ 24.1k tokens)`.
 The verb is randomised and the leading glyph rotates, so neither may be matched; the streaming token counter is the discriminator.
 It must never be an elapsed timer, because a finished pane renders its own (`✻ Worked for 26m 21s`) and the always-present status line carries one too.
+The counter counts only inside the parenthesised elapsed-time frame the harness draws around it, never bare on the line, because the scan window reaches past the footer into pane body where prose can mention a token count.
 This is the harness fact only: the regex itself is defined once in `bin/fm-tmux-lib.sh`, and `docs/harness-busy-signatures.md` records how to re-measure it when a harness update moves the signature again.
 
 First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.

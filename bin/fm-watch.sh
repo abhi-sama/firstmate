@@ -127,7 +127,11 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # Busy signatures per harness, OR-ed. Extend via env when new adapters are
 # verified. The set itself is defined once in bin/fm-tmux-lib.sh, which records
 # what each alternative was measured against and why an idle-matching addition
-# would be far worse than a missed busy pane.
+# would be far worse than a missed busy pane. The scan itself reads the set
+# inside fm_tail_is_busy, which applies this exact fallback, so this line is the
+# visible record that the watcher owns no private copy - never a second place
+# the override is resolved.
+# shellcheck disable=SC2034 # documents the resolved set; fm_tail_is_busy reads it.
 BUSY_REGEX=${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}
 # Always-on wake triage: most wakes during a long crew validation are benign (a
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
@@ -223,7 +227,7 @@ window_is_busy() {  # <window> <tail40>
     busy) return 0 ;;
     idle) return 1 ;;
     *)
-      FM_BUSY_REGEX="$BUSY_REGEX" fm_tail_is_busy "$tail40"
+      fm_tail_is_busy "$tail40"
       ;;
   esac
 }

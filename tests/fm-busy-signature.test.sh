@@ -170,6 +170,38 @@ EOF
   pass "finished pane with a notice banner reads NOT BUSY"
 }
 
+test_bare_token_counter_in_the_body_is_not_busy() {
+  local f
+  # The control for the widened window in the other direction: rows 7-8 of the
+  # scan are pane BODY, so a stopped crewmate whose transcript merely MENTIONS a
+  # token count must not read busy. This shape occurs in this repo's own prose
+  # and fixtures, so a crewmate doing firstmate self-work really does end turns
+  # with it on screen. The match is anchored to the parenthesised spinner frame
+  # precisely so that bare mention does not reproduce it.
+  f=$(fixture idle-body-mentions-counter <<'EOF'
+  - The **streaming token counter** (`↓ 24.1k tokens`) was present in all 43.
+    This is the discriminator; the docs quote ↓ 84.7k tokens as a second sample.
+✻ Worked for 12m 03s
+────────────────────────────────────────
+❯
+────────────────────────────────────────
+  Opus 5 · effort:high · firstmate  ⎇ fm/busy-signature-claude-v9 · ██░░░░░░░░ 22% (220k/1M) · 27m
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 5 agents
+EOF
+)
+  [ "$(is_busy "$f")" = "NOT BUSY" ] \
+    || fail "a stopped crewmate whose body mentions a token counter read as busy - the watcher would absorb it"
+
+  # Same text with no footer at all, so every line is body.
+  f=$(fixture idle-body-counter-only <<'EOF'
+the discriminator is ↓ 24.1k tokens
+grep for (↓|↑)[[:space:]]*[0-9][0-9.,]*[km]?[[:space:]]+tokens
+EOF
+)
+  [ "$(is_busy "$f")" = "NOT BUSY" ] || fail "a bare token counter in pane body read as busy"
+  pass "a token counter outside the spinner's parenthesised frame reads NOT BUSY"
+}
+
 test_busy_window_is_wider_than_the_body_hash_split() {
   # The busy window and fm-watch.sh's PANE_FOOTER_LINES answer different
   # questions and must stay separate constants; sharing one is what made the
@@ -360,6 +392,7 @@ test_streaming_spinner_is_busy
 test_spinner_verb_and_glyph_are_not_matched
 test_spinner_displaced_by_notice_banner_is_busy
 test_finished_pane_with_notice_banner_is_not_busy
+test_bare_token_counter_in_the_body_is_not_busy
 test_busy_window_is_wider_than_the_body_hash_split
 test_busy_tail_override_is_guarded
 test_legacy_and_other_harness_signatures_still_match

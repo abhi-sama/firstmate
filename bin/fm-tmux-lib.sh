@@ -57,6 +57,15 @@
 # in none of the idle ones. "(ctrl+b ctrl+b" is claude's run-in-background hint,
 # rendered only under an in-flight tool call.
 #
+# The counter is anchored INSIDE the spinner's parenthesised elapsed-time frame
+# ("(<digit-led elapsed> … ↓ <n> tokens"), never matched bare anywhere on the
+# line. That frame is structural: prose mentioning a token count - including
+# this repo's own docs and fixtures - does not reproduce it, which is what makes
+# a scan window wider than the footer safe. It narrows the false-positive
+# surface rather than eliminating it, since verbatim pane text pasted into a
+# transcript can still carry a complete frame; FM_STALE_ESCALATE_SECS (240s) and
+# FM_BUSY_CLAIM_MAX (1800s) remain the bounded backstops for that residue.
+#
 # The asymmetry that governs every edit here: missing a busy pane costs one
 # spurious wake, but matching an IDLE pane makes the watcher absorb a stopped
 # crewmate forever (AGENTS.md section 8). So never add anything the idle footer
@@ -66,7 +75,7 @@
 # ("Esc to cancel · Tab to amend") render while genuinely waiting on a human.
 # Re-measure with tests/fm-busy-signature.test.sh's fixtures; docs/harness-busy-signatures.md
 # records how to recapture them.
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|(↓|↑)[[:space:]]*[0-9][0-9.,]*[km]?[[:space:]]+tokens|\(ctrl\+b ctrl\+b'
+FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|\([0-9][^)]*(↓|↑)[[:space:]]*[0-9][0-9.,]*[km]?[[:space:]]+tokens|\(ctrl\+b ctrl\+b'
 
 # How many trailing non-blank lines the busy scan reads.
 #
@@ -79,7 +88,10 @@ FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|(�
 # fixed regex still read them all as not busy: the banner case is the common
 # case, not an edge case.
 #
-# 8 covers a spinner displaced by up to two notice rows. It is deliberately
+# 8 covers a spinner displaced by up to two notice rows. Rows past the 6-row
+# footer are pane BODY, so the widened window is safe only because the claude
+# alternative is anchored to the parenthesised spinner frame above; the two are
+# complementary, not alternatives. It is deliberately
 # NOT fm-watch.sh's PANE_FOOTER_LINES, which stays 6 because it answers a
 # different question - which rows tick on their own and so must be excluded
 # from the stale BODY hash. Widening that one instead would drop real

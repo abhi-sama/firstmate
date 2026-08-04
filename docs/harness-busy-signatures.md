@@ -28,23 +28,27 @@ Additions are additive - other harnesses and older builds still emit the existin
 Do this when a harness update is suspected of moving its signature, or when spurious `stale` wakes appear for crewmates that are demonstrably working.
 
 1. Find a crewmate that is **provably** mid-turn (streaming tokens or inside a tool call), and one that has **finished** its turn and is idle at the prompt.
-2. Capture what the predicate actually reads, which is the last 6 non-blank lines of a 40-line tail:
+2. Capture what the predicate actually reads, which is the last `FM_TMUX_BUSY_TAIL_DEFAULT` non-blank lines of a 40-line tail.
+   Read the window from the constant rather than hard-coding it, so the procedure cannot drift from the code again:
 
    ```sh
-   tmux capture-pane -p -t <window> -S -40 | grep -v '^[[:space:]]*$' | tail -6
+   . bin/fm-tmux-lib.sh
+   tmux capture-pane -p -t <window> -S -40 | grep -v '^[[:space:]]*$' | tail -"$FM_TMUX_BUSY_TAIL_DEFAULT"
    ```
 
 3. Sample the busy pane repeatedly, because animated elements vary between frames:
 
    ```sh
+   . bin/fm-tmux-lib.sh
    for i in $(seq 1 14); do
-     tmux capture-pane -p -t <window> -S -40 | grep -v '^[[:space:]]*$' | tail -6 | head -1
+     tmux capture-pane -p -t <window> -S -40 | grep -v '^[[:space:]]*$' | tail -"$FM_TMUX_BUSY_TAIL_DEFAULT" | head -1
      sleep 4
    done | sort -u
    ```
 
 4. Diff the two states and pick an anchor present **only** while a turn is in flight.
    Reject any candidate that also appears in the idle capture, and reject anything animated whose text varies between frames.
+   Prefer an anchor with **structure** around it - a bracketing frame the harness draws, not a bare word or number - because the scan window is wider than the footer and therefore also reads body rows.
 5. Capture the two dialog states too, since both must stay NOT BUSY: the trust prompt (launch the harness in a fresh untrusted directory) and a mid-turn tool-permission prompt (ask for a command the harness must confirm).
 6. Add the captured text as fixtures to `tests/fm-busy-signature.test.sh`, in **both** directions, then update `FM_TMUX_BUSY_REGEX_DEFAULT` and the `harness-adapters` entry.
 7. Confirm the fixtures actually discriminate, rather than passing vacuously:
@@ -76,6 +80,21 @@ Across 43 sampled busy footers in one session:
   Never match the glyph.
 - The **streaming token counter** (`↓ 24.1k tokens`) was present in all 43.
   This is the discriminator.
+
+The counter is matched **only inside the parenthesised elapsed-time frame** that wraps it, never bare anywhere on the line.
+The match requires an open paren, a digit-led elapsed token, then the arrow, a number, and `tokens`, all before the frame closes:
+
+```
+\([0-9][^)]*(↓|↑)[[:space:]]*[0-9][0-9.,]*[km]?[[:space:]]+tokens
+```
+
+That frame is **structural**, drawn by the harness, and prose that merely mentions a token count does not reproduce it.
+The line "the streaming token counter (`↓ 24.1k tokens`) was present in all 43", a few lines above in this very document, does not match, and neither does a transcript row quoting `↓ 24.1k tokens` on its own.
+**This is what makes a scan window wider than the footer safe**, because rows past the steady-state footer are pane body rather than chrome.
+
+Be honest about the limit: this narrows the false-positive surface rather than eliminating it.
+Verbatim pane text pasted into a transcript can still carry a complete frame, and a stopped crewmate whose body ends in one would read busy.
+The bounded backstops remain the safety net for that residue: a provably-working pane still escalates at `FM_STALE_ESCALATE_SECS` (240s), and a standing busy signature over a silent body surfaces at `FM_BUSY_CLAIM_MAX` (1800s).
 
 The finished pane renders its own elapsed timer, with no parentheses and no token counter:
 
@@ -120,6 +139,8 @@ Measured 2026-08-03, **three of four** live crewmates carried such a banner simu
 ```
 
 The window is therefore `FM_TMUX_BUSY_TAIL_DEFAULT` (8), which covers a spinner displaced by up to two notice rows.
+Rows 7 and 8 of that window are pane **body**, not footer, so the width is only safe in company with the parenthesised-frame anchor above.
+The two are complementary: the width buys margin against composers and notice banners that push the spinner up, and the anchor removes the false-positive surface that margin would otherwise open.
 
 **It is deliberately not `PANE_FOOTER_LINES`**, which stays 6 in `bin/fm-watch.sh`.
 Those two constants answer different questions.

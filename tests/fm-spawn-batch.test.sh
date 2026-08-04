@@ -102,6 +102,35 @@ ROWS
   pass "projects/ paths are scoped through the firstmate home for single-task spawn"
 }
 
+# Usage paths must answer without dereferencing a positional. `--help` is not an
+# option in the parser below, so before it was answered up front it fell into POS
+# and crashed on 'POS[1]: unbound variable'; missing positionals crashed the same
+# way. Both must now print usage instead.
+test_usage_paths() {
+  local out status
+  out=$(run_spawn --help)
+  status=$?
+  [ "$status" -eq 0 ] || fail "--help should exit 0, got $status: $out"
+  printf '%s\n' "$out" | grep -F 'Usage:' >/dev/null || fail "--help did not print usage"
+  printf '%s\n' "$out" | grep -F 'unbound variable' >/dev/null && fail "--help crashed on an unbound positional"
+
+  out=$(run_spawn)
+  status=$?
+  [ "$status" -eq 1 ] || fail "no args should exit 1, got $status: $out"
+  printf '%s\n' "$out" | grep -F 'error: <task-id> is required' >/dev/null \
+    || fail "no args did not report the missing task id"
+  printf '%s\n' "$out" | grep -F 'Usage:' >/dev/null || fail "no args did not print usage"
+
+  out=$(run_spawn nope-usage-z9)
+  status=$?
+  [ "$status" -eq 1 ] || fail "id-only should exit 1, got $status: $out"
+  printf '%s\n' "$out" | grep -F 'error: <project-dir> is required for a ship spawn' >/dev/null \
+    || fail "id-only did not report the missing project dir"
+  printf '%s\n' "$out" | grep -F 'Usage:' >/dev/null || fail "id-only did not print usage"
+  pass "usage paths print usage instead of crashing on an unbound positional"
+}
+
 test_batch_dispatches_every_pair
 test_batch_mode_boundaries
 test_projects_path_scoping
+test_usage_paths
