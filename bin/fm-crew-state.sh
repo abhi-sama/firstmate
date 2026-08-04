@@ -155,8 +155,8 @@ pane_readable() {  # <target>
 # `no-mistakes axi run` without --yes, which blocks synchronously until a gate
 # or outcome - AGENTS.md section 11) is not generating for that whole span, so
 # agent.get can read idle/blocked (bin/backends/herdr.sh maps both to `idle`)
-# while the pane's own rendered text still shows the harness's busy banner
-# (BUSY_REGEX, e.g. "esc to interrupt") for the entire tool call, exactly like
+# while the pane's own rendered text still shows the harness's busy signature
+# (the shared set in bin/fm-tmux-lib.sh) for the entire tool call, exactly like
 # tmux's regex-only reader would correctly report. Trusting herdr's `idle`
 # outright (skipping that corroboration) is what let a still-working crew read
 # as not-busy here, and - combined with a no-mistakes run-step lookup that also

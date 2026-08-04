@@ -2,9 +2,11 @@
 # fm-tmux-lib.sh — shared tmux pane primitives for firstmate.
 #
 # ONE source of truth for: busy detection, composer-empty (pending-input)
-# detection, and a verify-and-retry-Enter submit. Sourced by both the away-mode
-# daemon (bin/fm-supervise-daemon.sh) and bin/fm-send.sh so the composer/submit
-# logic cannot drift between the two.
+# detection, and a verify-and-retry-Enter submit. Sourced by bin/fm-send.sh, the
+# away-mode daemon (bin/fm-supervise-daemon.sh), bin/fm-watch.sh and
+# bin/fm-crew-state.sh, so neither the composer/submit logic nor the busy
+# signature can drift between them. The watcher used to carry its own copy of the
+# busy regex literal, which meant a fix to one was not a fix to the other.
 #
 # Why this exists (incident afk-invx-i5): the daemon's old composer check only
 # recognized a BARE prompt glyph ("> ") as an empty composer. claude draws its
@@ -29,7 +31,9 @@
 #
 # Per-harness override: FM_COMPOSER_IDLE_RE matches an empty composer after
 # dim-ghost and structural border stripping. FM_BUSY_REGEX overrides the busy
-# footer set (mirrors fm-watch.sh / the daemon).
+# signature set defined below, and FM_BUSY_TAIL_LINES the number of trailing
+# non-blank lines scanned for it; both are read by every caller through
+# fm_tail_is_busy. Re-measuring a drifted signature: docs/harness-busy-signatures.md.
 #
 # All functions are `set -u` and `set -e` safe (guarded tmux calls, explicit
 # returns) so they can be sourced into either context.

@@ -3,6 +3,11 @@
 # secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+#        fm-spawn.sh -h|--help
+#   -h/--help prints the usage summary in usage() below and exits 0. It is answered
+#   before the watcher guard runs and before any positional is read, so it works
+#   regardless of fleet state. A missing <task-id> or <project-dir> is likewise a
+#   usage error (exit 1) rather than an unbound-variable crash.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile

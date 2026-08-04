@@ -27,7 +27,7 @@ An idle claude pane is never byte-stable.
 Its footer carries a live session-duration clock, a running cost figure and a context gauge, all of which advance on a pane doing no work at all.
 
 Measured against the live pane on 2026-07-31, sampling the same window every 20s.
-`body` is the capture's non-blank lines minus the trailing 6 (the footer block `window_is_busy` already scans); `full` is the whole capture, which is what the watcher hashed:
+`body` is the capture's non-blank lines minus the trailing 6 (the footer block `window_is_busy` also scanned for the busy signature at the time); `full` is the whole capture, which is what the watcher hashed:
 
 ```
 $ body() { tmux capture-pane -p -t "$1" -S -40 | grep -v '^[[:space:]]*$' \
@@ -90,8 +90,11 @@ In `bin/fm-watch.sh`:
 
 - The stale hash covers the pane **body** only - the transcript above the harness footer - via `hash_pane_body`.
   The footer is still read, by `window_is_busy`, for the busy signature; that is what it is for.
-  Both sides share `PANE_FOOTER_LINES` so they cannot drift apart.
+  Both sides shared `PANE_FOOTER_LINES` so they could not drift apart.
   A footer tick is no longer mistaken for progress, so the suppressor holds and the wedge timer matures.
+  **Superseded 2026-08-03:** the two sides no longer share one constant.
+  `PANE_FOOTER_LINES` still governs the body/footer split for the stale hash, but the busy scan moved to its own wider window (`FM_BUSY_TAIL_LINES`, default 8) in `bin/fm-tmux-lib.sh`, because claude can push its busy signature above the 6-row footer with persistent notice banners.
+  The reasoning for keeping them separate is in [harness-busy-signatures.md](harness-busy-signatures.md); widening the shared constant instead would have dropped real transcript rows out of the body hash and blunted the very detection this fix restored.
 - `FM_BUSY_CLAIM_MAX` (default 1800s) bounds how long a rendered busy signature may suppress supervision: a pane still claiming busy whose body has produced no output for that long surfaces once per episode, and the episode re-arms the moment the body moves again or the signature drops.
   The episode is timed from the later of two clocks, `.body-since-*` and `.busy-since-*`, because both halves of the claim have to have held: the body clock alone is only refreshed on body movement, so a window that sat idle and not busy for longer than the bound would trip it on the first poll of a signature that had just appeared.
 - `FM_HEARTBEAT_MAX_INFLIGHT` (default 900s) caps the heartbeat backoff whenever any task is in flight.
