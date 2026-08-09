@@ -17,12 +17,19 @@
 # `pane send-keys <pane> enter` call and forwards everything else to the real
 # binary untouched.
 #
-# The "supervisor pane" is a tiny deterministic bash loop (not a real harness):
-# it draws a bordered composer row ("│ > <buf> │") matching the structural
-# classifier fm_backend_herdr_composer_state expects, and logs every submitted
+# The "supervisor pane" is a tiny deterministic bash loop (not a real harness
+# binary): it draws a bordered composer row ("│ > <buf> │") that exercises the
+# bordered branch of fm_backend_herdr_composer_state, and logs every submitted
 # line (hex + text + injection/user classification) - the same technique
 # tests/fm-afk-inject-e2e.test.sh uses for its tmux supervisor pane, so this
-# test asserts on submitted CONTENT, not pane appearance.
+# test asserts on submitted CONTENT, not pane appearance. It ALSO registers
+# itself as a real herdr agent via `herdr pane report-agent` and reports an
+# idle/working/idle cycle around each submission, because
+# fm_backend_herdr_send_text_submit's confirmation is native agent-state
+# (agent get), not composer content, since the 2026-07-07 incident fix
+# (docs/herdr-backend.md "Native agent-state submit confirmation") - a pane
+# that only draws composer text without being a registered agent would read
+# agent_not_found forever and never confirm a submission.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -34,10 +41,15 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 
+# This suite runs against its own isolated lab session, so a Herdr pane
+# inherited from the terminal it was launched in must not follow spawn into it
+# as a cross-session parent identity (tests/herdr-test-safety.sh).
+herdr_forget_inherited_pane
+
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
-SESSION="fm-afk-herdr-e2e-$$"
+SESSION="fm-lab-afk-herdr-e2e-$$"
 export HERDR_SESSION="$SESSION"
 STATE_DIR=
 HERDR_SHIM_DIR=
@@ -58,9 +70,10 @@ cleanup_all() {
   rm -rf "${STATE_DIR:-}" 2>/dev/null || true
 }
 trap cleanup_all EXIT
+fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 # --- source the daemon (for afk_enter/afk_exit/FM_INJECT_MARK) + the backend -
-# shellcheck source=bin/fm-supervise-daemon.sh
+# shellcheck source=/dev/null
 . "$DAEMON"
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
@@ -84,6 +97,30 @@ EOF
 [ -n "$PANE_ID" ] || fail "create_task did not return a pane id"
 SUPERVISOR_TARGET="$SESSION:$PANE_ID"
 
+# Herdr can return the created pane before its interactive shell is ready to
+# receive Enter. Require a stable shell-owned foreground before launching the
+# fixture, or the command can remain typed but unsubmitted in the shell buffer.
+PANE_READY=false
+READY_SAMPLES=0
+for _ in $(seq 1 100); do
+  PROCESS_INFO=$(fm_backend_herdr_cli "$SESSION" pane process-info --pane "$PANE_ID" 2>/dev/null || true)
+  if printf '%s' "$PROCESS_INFO" | jq -e '
+    .result.process_info as $process
+    | ($process.foreground_processes | length == 1)
+      and ($process.foreground_processes[0].pid == $process.shell_pid)
+  ' >/dev/null 2>&1; then
+    READY_SAMPLES=$((READY_SAMPLES + 1))
+    if [ "$READY_SAMPLES" -ge 10 ]; then
+      PANE_READY=true
+      break
+    fi
+  else
+    READY_SAMPLES=0
+  fi
+  sleep 0.1
+done
+[ "$PANE_READY" = true ] || fail "the supervisor pane's shell did not become ready"
+
 # A second, independent live task tab in the same workspace, mirroring the tmux
 # e2e's fake fm-fake-c1 crewmate window - not required by scan_signals (which
 # only watches state/*.status mtimes, no window/pane dependency), but kept for
@@ -96,20 +133,40 @@ EOF
 
 # --- deterministic bordered-composer loop, drawn in the scratch pane ---------
 # Mirrors tests/fm-afk-inject-e2e.test.sh's supervisor-loop.sh, but draws a
-# "│ > <buf> │" border so fm_backend_herdr_composer_state's structural
-# classifier (a row whose trimmed content starts AND ends with the same border
-# glyph) recognizes it, exactly like a real bordered-TUI harness composer.
+# "│ > <buf> │" border so the bordered branch of
+# fm_backend_herdr_composer_state recognizes it, exactly like a bordered-TUI
+# harness composer. ALSO registers itself as a real herdr agent via `herdr
+# pane report-agent` and reports idle/working transitions around each
+# submission: fm_backend_herdr_send_text_submit's confirmation is now native
+# agent-state (agent get), not composer content (docs/herdr-backend.md
+# "Native agent-state submit confirmation"), so a synthetic pane that only
+# draws composer TEXT but is never registered as an agent would report
+# agent_not_found forever - every confirmation attempt would read 'unknown',
+# never 'empty', and the daemon would treat every injection as unconfirmed and
+# keep retyping it on every housekeeping tick (the exact duplicate-send
+# failure mode this whole change exists to prevent) - discovered by this very
+# test regressing when the composer-only version of this fixture was run
+# against the new confirmation code. `herdr pane report-agent` is herdr's own
+# documented integration-protocol primitive for a non-built-in-harness process
+# to report its own agent state, verified empirically against real herdr 0.7.1
+# in an isolated session.
 LOOP_SCRIPT="$STATE_DIR/supervisor-loop.sh"
 cat > "$LOOP_SCRIPT" <<'LOOP'
 #!/usr/bin/env bash
-MARK=$'\x1f'
+MARK=$'\xE2\x81\xA3'
 LOG="$1"
+AGENT_SOURCE=fm-test-supervisor
+AGENT_LABEL=fm-test-supervisor
+report_agent_state() {  # <idle|working>
+  herdr pane report-agent "$HERDR_PANE_ID" --source "$AGENT_SOURCE" --agent "$AGENT_LABEL" --state "$1" --session "$HERDR_SESSION" >/dev/null 2>&1
+}
 OLD_STTY=$(stty -g 2>/dev/null || true)
 [ -z "$OLD_STTY" ] || stty -echo -icanon min 1 time 0 2>/dev/null || true
 cleanup() {
   [ -z "$OLD_STTY" ] || stty "$OLD_STTY" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
+report_agent_state idle
 
 _buf=
 # redraw: keep the composer visually pinned to ONE terminal row regardless of
@@ -146,6 +203,14 @@ submit_line() {
   _buf=
   printf '\r\033[K\n'
   redraw
+  # Report a real idle->working->idle cycle around the submission, exactly
+  # like a real harness's agent_status - this is the signal
+  # fm_backend_herdr_send_text_submit now confirms against. The 0.6s "working"
+  # window comfortably covers the daemon's FM_INJECT_CONFIRM_SLEEP=0.5
+  # per-attempt budget used by the scenarios below.
+  report_agent_state working
+  sleep 0.6
+  report_agent_state idle
 }
 
 redraw
@@ -342,21 +407,17 @@ test_scenario_b() {
 
   sleep 10
 
-  local digest_count
-  digest_count=$(grep -c 'Supervisor escalate' "$LOG_FILE" || true)
-  [ "$digest_count" -eq 1 ] \
-    || fail "Scenario B: expected exactly 1 digest, got $digest_count (duplicate or lost)"
-
-  if grep -q "$(printf '\x1f').*$(printf '\x1f')" "$LOG_FILE"; then
-    fail "Scenario B: digest concatenated with itself (two sentinel markers in one line)"
-  fi
+  local marker_count
+  marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
+  [ "$marker_count" -eq 1 ] \
+    || fail "Scenario B: expected exactly 1 U+2063 marker, got $marker_count (duplicate or lost)"
 
   local digest_line digest_hex
   digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
   digest_hex=$(printf '%s' "$digest_line" | cut -f1)
   case "$digest_hex" in
-    1f*) ;;
-    *) fail "Scenario B: digest does not start with the sentinel marker (hex: $digest_hex)" ;;
+    e281a3*) ;;
+    *) fail "Scenario B: digest does not start with the terminal-safe sentinel marker (hex: $digest_hex)" ;;
   esac
 
   local user_count
@@ -378,14 +439,10 @@ test_scenario_c() {
   echo "done: PR https://example.test/pr/300" > "$STATE_DIR/fake-c1.status"
   sleep 8
 
-  local digest_count
-  digest_count=$(grep -c 'Supervisor escalate' "$LOG_FILE" || true)
-  [ "$digest_count" -eq 1 ] \
-    || fail "Scenario C: expected exactly 1 digest, got $digest_count"
-
-  if grep -q "$(printf '\x1f').*$(printf '\x1f')" "$LOG_FILE"; then
-    fail "Scenario C: digest concatenated with itself (two sentinel markers in one line)"
-  fi
+  local marker_count
+  marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
+  [ "$marker_count" -eq 1 ] \
+    || fail "Scenario C: expected exactly 1 U+2063 marker, got $marker_count"
 
   local digest_line digest_hex
   digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
@@ -395,8 +452,8 @@ test_scenario_c() {
   esac
   digest_hex=$(printf '%s' "$digest_line" | cut -f1)
   case "$digest_hex" in
-    1f*) ;;
-    *) fail "Scenario C: digest does not start with the sentinel marker (hex: $digest_hex)" ;;
+    e281a3*) ;;
+    *) fail "Scenario C: digest does not start with the terminal-safe sentinel marker (hex: $digest_hex)" ;;
   esac
 
   local user_count
