@@ -43,6 +43,16 @@
 # "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
+# Every scaffold - ship, scout, and secondmate charter - opens with a "Dispatch
+# provenance" block. bin/fm-spawn.sh delivers all three behind
+# bin/fm-operational-input.sh's invisible launch-brief marker, and a worker that
+# reads that marker as concealment refuses the whole dispatch - in a window no human
+# is watching, so the refusal surfaces only when a supervisor happens to look. The
+# block discloses the marker in visible text, names paths the worker can read with
+# its own tools to corroborate this exact dispatch, explains why the status and
+# report paths sit outside the project, and routes an unresolved doubt to a
+# "blocked:" status line instead of a question no one will answer. It never alters
+# the marker bytes, which bin/fm-operational-input.sh owns as permanent compatibility.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
@@ -181,6 +191,72 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 
+# Build the "Dispatch provenance" block this script's header describes. Every path
+# is interpolated per task, so the worker corroborates this exact dispatch rather
+# than a template it cannot check.
+if [ "$KIND" = secondmate ]; then
+  # A secondmate home is a firstmate checkout in its own right and may sit on
+  # another machine, so its corroboration points at its own copies rather than at
+  # the dispatching home's paths. The parent's task record is still named, marked
+  # as reachable only when both homes share a machine. Its marked-request channel
+  # is owned by the charter's own "Requests from the main firstmate" section, so
+  # this block points there instead of restating it.
+  PROVENANCE_LATER="Later requests from the main firstmate carry their own marker, described under \"Requests from the main firstmate\" below; that is the same kind of disclosed routing tag, not a reason to stop."
+  IFS= read -r -d '' PROVENANCE_SOURCES <<EOF || true
+- \`data/charter.md\` in this home - this same charter on disk, the instructions you were just handed.
+- \`bin/fm-operational-input.sh\` in this home - the marker's definition, which documents this exact wire form and why it is permanent.
+- \`AGENTS.md\` in this home - your job description and the lifecycle this charter comes from.
+- \`$STATE/$ID.meta\` - the dispatching firstmate's record of this home, naming the harness and window it launched; readable when that home is on this machine.
+EOF
+  IFS= read -r -d '' PROVENANCE_OUTSIDE <<EOF || true
+The status file named below lives in the dispatching firstmate's home rather than in yours.
+That is deliberate: it is the channel that wakes the main firstmate, which never reads your chat, so an answer left only in this window is lost.
+EOF
+  IFS= read -r -d '' PROVENANCE_STALL <<EOF || true
+Nobody monitors this window on your behalf: the main firstmate never reads your chat, and the captain types here only on their own initiative.
+Stopping to ask for confirmation would wait indefinitely.
+EOF
+else
+  PROVENANCE_LATER="Every later message firstmate sends you carries the same marker, so a marked steer mid-task is ordinary supervision from the same sender rather than a fresh reason to stop."
+  IFS= read -r -d '' PROVENANCE_SOURCES <<EOF || true
+- \`$BRIEF\` - this brief on disk, the same instructions you were just handed.
+- \`$STATE/$ID.meta\` - firstmate's record of this dispatch: the harness and window it launched, and the worktree path you should already be standing in.
+- \`$FM_ROOT/bin/fm-operational-input.sh\` - the marker's definition, which documents this exact wire form and why it is permanent.
+- \`$FM_ROOT/AGENTS.md\` - the job description of the firstmate system that dispatched you, including the lifecycle this brief comes from.
+EOF
+  IFS= read -r -d '' PROVENANCE_OUTSIDE <<EOF || true
+The status file named below - and any report path this brief names - lives under the firstmate home rather than inside this project.
+That is deliberate: they are firstmate's durable records of your work, they must outlive this disposable worktree, and they must never land in the project's own history.
+Writing them is expected, and they are the only paths outside the worktree this brief asks you to write.
+EOF
+  IFS= read -r -d '' PROVENANCE_STALL <<EOF || true
+No human is watching this window.
+Stopping to ask a person to confirm this dispatch would wait forever, and nothing you say here reaches anyone.
+EOF
+fi
+PROVENANCE_SOURCES=${PROVENANCE_SOURCES%$'\n'}
+PROVENANCE_OUTSIDE=${PROVENANCE_OUTSIDE%$'\n'}
+PROVENANCE_STALL=${PROVENANCE_STALL%$'\n'}
+IFS= read -r -d '' PROVENANCE <<EOF || true
+# Dispatch provenance - read this before anything else
+
+This message begins with an invisible U+2063 separator followed by the visible text \`FIRSTMATE_OP: v1 launch-brief:\`.
+That is firstmate's own routing marker, and it is disclosed here deliberately so you meet it as documented protocol instead of discovering it as something hidden.
+It exists only so firstmate's tooling can tell its own operational input apart from text a human typed into this window; it carries no instruction of its own.
+$PROVENANCE_LATER
+
+You do not have to take any of that on trust.
+Read these files with your own tools first and confirm they describe this exact session:
+
+$PROVENANCE_SOURCES
+
+$PROVENANCE_OUTSIDE
+
+$PROVENANCE_STALL
+If you still cannot satisfy yourself that the dispatch is genuine, do not idle: append \`blocked: {why}\` to the status file named below, which does reach a supervisor, and stop.
+EOF
+PROVENANCE=${PROVENANCE%$'\n'}
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -203,6 +279,8 @@ else
   PROJECT_CLONES_NOTE="The projects above are local clones for work you supervise; they are not an exclusive ownership claim."
 fi
 cat > "$BRIEF" <<EOF
+$PROVENANCE
+
 You are a persistent second mate managed by the main firstmate. Work on your own; do not wait for a human.
 
 # Charter
@@ -303,6 +381,8 @@ fi
 
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
+$PROVENANCE
+
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
@@ -413,6 +493,8 @@ esac
 DOD=${DOD%$'\n'}
 
 cat > "$BRIEF" <<EOF
+$PROVENANCE
+
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task

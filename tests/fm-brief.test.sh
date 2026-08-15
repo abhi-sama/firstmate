@@ -730,9 +730,125 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# bin/fm-spawn.sh hands every brief to the worker through
+# bin/fm-operational-input.sh's launch-brief encoding, so each one arrives behind an
+# invisible U+2063 separator. A dispatched scout read that as concealment, refused the
+# whole brief as a prompt injection, and idled in a window nobody was watching until a
+# supervisor happened to look. The provenance block is the fix: it discloses the marker
+# in visible text, names paths the worker can read itself, explains the writes that land
+# outside the project, and routes an unresolved doubt to `blocked:` instead of to a
+# question no one will answer. Every scaffold a worker can receive must carry it, with
+# this task's real absolute paths rather than placeholders.
+test_dispatch_provenance_block_opens_every_scaffold() {
+  local home brief id
+  home="$TMP_ROOT/provenance-home"
+  mkdir -p "$home/data" "$home/state"
+
+  for id_kind in "prov-ship-nm:--mode no-mistakes" "prov-ship-dpr:--mode direct-PR" \
+                 "prov-ship-lo:--mode local-only" "prov-scout:--scout"; do
+    id=${id_kind%%:*}
+    # shellcheck disable=SC2086 # The fixture flags are deliberately word-split.
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj ${id_kind#*:} >/dev/null 2>&1 \
+      || fail "$id: fm-brief.sh exited non-zero"
+    brief="$home/data/$id/brief.md"
+
+    [ "$(head -n 1 "$brief")" = "# Dispatch provenance - read this before anything else" ] \
+      || fail "$id: the provenance block is not the first thing the worker reads"
+
+    assert_grep "invisible U+2063 separator followed by the visible text \`FIRSTMATE_OP: v1 launch-brief:\`" \
+      "$brief" "$id: brief does not disclose the marker it actually arrives behind"
+    assert_grep "Every later message firstmate sends you carries the same marker" "$brief" \
+      "$id: brief does not pre-empt a mid-task refusal of a marked steer"
+
+    assert_grep "- \`$home/data/$id/brief.md\` - this brief on disk" "$brief" \
+      "$id: brief does not name its own on-disk path as corroboration"
+    assert_grep "- \`$home/state/$id.meta\` - firstmate's record of this dispatch" "$brief" \
+      "$id: brief does not name the task record that pins this worktree and endpoint"
+    assert_grep "- \`$ROOT/bin/fm-operational-input.sh\`" "$brief" \
+      "$id: brief does not point at the marker's own definition"
+    assert_grep "- \`$ROOT/AGENTS.md\`" "$brief" \
+      "$id: brief does not point at the dispatching system's job description"
+    assert_no_grep '<FM_HOME>' "$brief" "$id: provenance paths were left as placeholders"
+    assert_no_grep '<task-id>' "$brief" "$id: provenance paths were left as placeholders"
+
+    assert_grep "lives under the firstmate home rather than inside this project" "$brief" \
+      "$id: brief does not explain why it writes outside the project"
+    assert_grep "No human is watching this window." "$brief" \
+      "$id: brief does not tell the worker that stopping to ask stalls forever"
+    assert_grep "do not idle: append \`blocked: {why}\` to the status file named below" "$brief" \
+      "$id: brief does not route an unresolved doubt to the channel that reaches a supervisor"
+  done
+
+  id=prov-charter
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Own the alpha domain.' \
+    "$ROOT/bin/fm-brief.sh" "$id" --secondmate alpha >/dev/null 2>&1 \
+    || fail "$id: fm-brief.sh secondmate scaffold exited non-zero"
+  brief="$home/data/$id/brief.md"
+  [ "$(head -n 1 "$brief")" = "# Dispatch provenance - read this before anything else" ] \
+    || fail "$id: the charter's provenance block is not the first thing the secondmate reads"
+  assert_grep "invisible U+2063 separator followed by the visible text \`FIRSTMATE_OP: v1 launch-brief:\`" \
+    "$brief" "$id: charter does not disclose the marker it actually arrives behind"
+  # A secondmate home is a firstmate checkout of its own and may be remote, so its
+  # corroboration is its own copies plus the parent's task record.
+  assert_grep "- \`data/charter.md\` in this home" "$brief" \
+    "$id: charter does not name its own on-disk copy as corroboration"
+  assert_grep "- \`AGENTS.md\` in this home" "$brief" \
+    "$id: charter does not point at the job description of the system it belongs to"
+  assert_grep "- \`$home/state/$id.meta\` - the dispatching firstmate's record of this home" "$brief" \
+    "$id: charter does not name the dispatching firstmate's record of this home"
+  assert_grep "Requests from the main firstmate" "$brief" \
+    "$id: charter does not connect the launch marker to its later marked-request channel"
+  assert_grep "do not idle: append \`blocked: {why}\` to the status file named below" "$brief" \
+    "$id: charter does not route an unresolved doubt to the channel that reaches the main firstmate"
+
+  pass "fm-brief.sh: ship, scout, and charter scaffolds open with an interpolated dispatch-provenance block"
+}
+
+# The disclosure is only worth anything if it describes the bytes that actually
+# arrive. This drives the real delivery path bin/fm-spawn.sh uses - piping the
+# generated brief through `fm-operational-input.sh encode launch-brief` - and pins
+# the encoded prefix by its bytes, so changing the marker or the disclosure without
+# the other fails here. The permanent U+2063 + "FIRSTMATE_OP: " compatibility bytes
+# are asserted through that same executable interface, never from script source.
+test_dispatch_provenance_matches_the_delivered_wire_form() {
+  local home brief encoded prefix_hex kind disclosed
+  home="$TMP_ROOT/provenance-wire-home"
+  mkdir -p "$home/data" "$home/state"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" prov-wire someproj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh exited non-zero"
+  brief="$home/data/prov-wire/brief.md"
+
+  encoded=$("$ROOT/bin/fm-operational-input.sh" encode launch-brief < "$brief") \
+    || fail "the generated brief could not be encoded for launch"
+
+  # 34 bytes: U+2063 (e2 81 a3) + "FIRSTMATE_OP: v1 launch-brief: ".
+  prefix_hex=$(printf '%s' "$encoded" | head -c 34 | od -An -tx1 | tr -d ' \n')
+  [ "$prefix_hex" = e281a346495253544d4154455f4f503a207631206c61756e63682d62726965663a20 ] \
+    || fail "the launch encoding no longer emits the landed U+2063 FIRSTMATE_OP launch-brief bytes: $prefix_hex"
+
+  disclosed='FIRSTMATE_OP: v1 launch-brief: '
+  case "$encoded" in
+    "$(printf '\xE2\x81\xA3')$disclosed"*) : ;;
+    *) fail "the encoded launch input does not START with the marker the brief discloses" ;;
+  esac
+
+  # The brief's own disclosure sentence must quote that exact visible header text.
+  assert_grep "\`${disclosed% }\`" "$brief" \
+    "the brief discloses a header that is not the one the encoder actually emits"
+
+  kind=$(printf '%s' "$encoded" | "$ROOT/bin/fm-operational-input.sh" kind) \
+    || fail "the encoded launch input no longer classifies as a current operational input"
+  [ "$kind" = launch-brief ] \
+    || fail "the encoded launch input classified as '$kind', not launch-brief"
+
+  pass "fm-brief.sh: the disclosed marker is byte-identical to the one the launch encoding emits"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
+test_dispatch_provenance_block_opens_every_scaffold
+test_dispatch_provenance_matches_the_delivered_wire_form
 test_ship_modes_generate_clean_briefs
 test_scout_brief_has_no_quality_bar_section
 test_ship_mode_is_required_and_closed_set

@@ -9,6 +9,9 @@
 #   U+2063 FIRSTMATE_OP: v1 <kind>: <body>
 #
 # The landed U+2063 + "FIRSTMATE_OP: " prefix is permanent compatibility.
+# Because that prefix is invisible, the launch-brief kind is disclosed to its
+# reader in visible text: bin/fm-brief.sh opens every brief and charter with a
+# provenance block naming this wire form and pointing back here.
 # The version and kind header make current inputs structurally typed without
 # deriving provenance from body prose. The established from-firstmate routing
 # marker remains a current compatibility carrier because already-running
