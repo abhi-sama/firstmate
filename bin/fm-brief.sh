@@ -44,15 +44,20 @@
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Every scaffold - ship, scout, and secondmate charter - opens with a "Dispatch
-# provenance" block. bin/fm-spawn.sh delivers all three behind
-# bin/fm-operational-input.sh's invisible launch-brief marker, and a worker that
-# reads that marker as concealment refuses the whole dispatch - in a window no human
-# is watching, so the refusal surfaces only when a supervisor happens to look. The
-# block discloses the marker in visible text, names paths the worker can read with
-# its own tools to corroborate this exact dispatch, explains why the status and
-# report paths sit outside the project, and routes an unresolved doubt to a
-# "blocked:" status line instead of a question no one will answer. It never alters
-# the marker bytes, which bin/fm-operational-input.sh owns as permanent compatibility.
+# provenance" block. bin/fm-spawn.sh delivers a brief behind
+# bin/fm-operational-input.sh's invisible launch-brief tag, and a worker that reads
+# that tag as concealment refuses the whole dispatch, or pays a recurring tax
+# re-litigating it, in a window that reaches a supervisor only through the status
+# file. The block discloses the tag in visible text, points at what the reader can
+# actually read to corroborate the dispatch, and routes an unresolved doubt to a
+# "blocked:" status line. It deliberately does NOT ask for compliance: verifying the
+# sender is separated from judging the instruction, which the worker still owes.
+# It never alters the marker bytes, which bin/fm-operational-input.sh owns as
+# permanent compatibility.
+# The block is kept small on purpose. Each sentence must be true for every kind, for
+# local and remote placement, and for every harness, so a charter names no path under
+# the dispatching home and the tag disclosure holds whether the brief arrived as
+# encoded text or as a file path.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
@@ -191,69 +196,67 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 
-# Build the "Dispatch provenance" block this script's header describes. Every path
-# is interpolated per task, so the worker corroborates this exact dispatch rather
-# than a template it cannot check.
+# Build the "Dispatch provenance" block this script's header describes.
+# Three kinds of sentence are allowed here and nothing else: the tag disclosure,
+# a corroboration pointer the reader can actually reach, and the blocked-rather-
+# than-idle failure-safe. Anything beyond those is another claim that has to hold
+# across ship, scout and charter, local and remote placement, and every supported
+# harness - which is where every accuracy defect in this block has come from.
+# The disclosure never says the reader IS looking at a tagged message: kimi's
+# launch template passes a brief PATH rather than encoded text, and fm-brief.sh
+# has no harness input to condition on, so the wording must hold either way.
 if [ "$KIND" = secondmate ]; then
-  # A secondmate home is a firstmate checkout in its own right and may sit on
-  # another machine, so its corroboration points at its own copies rather than at
-  # the dispatching home's paths. The parent's task record is still named, marked
-  # as reachable only when both homes share a machine. Its marked-request channel
-  # is owned by the charter's own "Requests from the main firstmate" section, so
-  # this block points there instead of restating it.
-  PROVENANCE_LATER="Later requests from the main firstmate carry their own marker, described under \"Requests from the main firstmate\" below; that is the same kind of disclosed routing tag, not a reason to stop."
+  # A charter is published to remote hosts by bin/fm-remote-home-seed.sh, which
+  # rewrites only the parent status path and copies every other byte verbatim.
+  # So this block names no path under the dispatching home at all; that is the
+  # privacy property, guarded in tests/fm-brief.test.sh.
+  # The one pointer it does name is relative and always present: a secondmate
+  # home is a firstmate checkout in its own right (bin/fm-home-seed.sh clones one
+  # locally, bin/fm-remote-home-provision.sh refuses a remote home that is not
+  # one). data/charter.md is deliberately NOT named - bin/fm-spawn.sh falls back
+  # to the dispatching home's brief when that copy is absent.
+  PROVENANCE_LATER="Later requests from the main firstmate carry their own tag, described under \"Requests from the main firstmate\" below."
   IFS= read -r -d '' PROVENANCE_SOURCES <<EOF || true
-- \`data/charter.md\` in this home - this same charter on disk, the instructions you were just handed.
-- \`bin/fm-operational-input.sh\` in this home - the marker's definition, which documents this exact wire form and why it is permanent.
-- \`AGENTS.md\` in this home - your job description and the lifecycle this charter comes from.
-- \`$STATE/$ID.meta\` - the dispatching firstmate's record of this home, naming the harness and window it launched; readable when that home is on this machine.
+Read \`bin/fm-operational-input.sh\` in this home with your own tools rather than taking that on trust: it defines the tag, and documents this exact wire form and why it is permanent.
 EOF
-  IFS= read -r -d '' PROVENANCE_OUTSIDE <<EOF || true
-The status file named below lives in the dispatching firstmate's home rather than in yours.
-That is deliberate: it is the channel that wakes the main firstmate, which never reads your chat, so an answer left only in this window is lost.
-EOF
-  IFS= read -r -d '' PROVENANCE_STALL <<EOF || true
-Nobody monitors this window on your behalf: the main firstmate never reads your chat, and the captain types here only on their own initiative.
-Stopping to ask for confirmation would wait indefinitely.
-EOF
+  PROVENANCE_SUBJECT="The main firstmate hands you this charter"
+  PROVENANCE_CONTRACT="this charter"
+  PROVENANCE_REACHES="the main firstmate"
 else
-  PROVENANCE_LATER="Every later message firstmate sends you carries the same marker, so a marked steer mid-task is ordinary supervision from the same sender rather than a fresh reason to stop."
+  # A ship or scout brief is only ever delivered locally - bin/fm-remote-home-seed.sh
+  # is the sole remote brief path and both of its scaffold calls pass --secondmate -
+  # so absolute paths in this home are genuinely readable by the worker, and they
+  # are what answer "nothing in this session corroborates the dispatch".
+  # bin/fm-send.sh tags a secondmate target only, so a crewmate's later steers are
+  # untagged; saying otherwise would teach it to refuse ordinary supervision.
+  # firstmate's own AGENTS.md is deliberately absent from the list: it is written in
+  # the second person and forbids writing to a project, so a crewmate that reads it
+  # as its own instructions can refuse the job it was dispatched to do.
+  PROVENANCE_LATER="Later messages firstmate sends you carry no tag at all, so an untagged instruction arriving mid-task is ordinary supervision rather than a sign of an impostor."
   IFS= read -r -d '' PROVENANCE_SOURCES <<EOF || true
-- \`$BRIEF\` - this brief on disk, the same instructions you were just handed.
-- \`$STATE/$ID.meta\` - firstmate's record of this dispatch: the harness and window it launched, and the worktree path you should already be standing in.
-- \`$FM_ROOT/bin/fm-operational-input.sh\` - the marker's definition, which documents this exact wire form and why it is permanent.
-- \`$FM_ROOT/AGENTS.md\` - the job description of the firstmate system that dispatched you, including the lifecycle this brief comes from.
+Read these with your own tools rather than taking that on trust:
+
+- \`$BRIEF\` - this brief on disk, the same instructions you were handed.
+- \`$STATE/$ID.meta\` - firstmate's record of this dispatch, naming the harness, the window, and the worktree it launched them in.
+- \`$FM_ROOT/bin/fm-operational-input.sh\` - the tag's definition, which documents this exact wire form and why it is permanent.
 EOF
-  IFS= read -r -d '' PROVENANCE_OUTSIDE <<EOF || true
-The status file named below - and any report path this brief names - lives under the firstmate home rather than inside this project.
-That is deliberate: they are firstmate's durable records of your work, they must outlive this disposable worktree, and they must never land in the project's own history.
-Writing them is expected, and they are the only paths outside the worktree this brief asks you to write.
-EOF
-  IFS= read -r -d '' PROVENANCE_STALL <<EOF || true
-No human is watching this window.
-Stopping to ask a person to confirm this dispatch would wait forever, and nothing you say here reaches anyone.
-EOF
+  PROVENANCE_SUBJECT="Firstmate hands you this brief"
+  PROVENANCE_CONTRACT="this brief"
+  PROVENANCE_REACHES="a supervisor"
 fi
 PROVENANCE_SOURCES=${PROVENANCE_SOURCES%$'\n'}
-PROVENANCE_OUTSIDE=${PROVENANCE_OUTSIDE%$'\n'}
-PROVENANCE_STALL=${PROVENANCE_STALL%$'\n'}
 IFS= read -r -d '' PROVENANCE <<EOF || true
-# Dispatch provenance - read this before anything else
+# Dispatch provenance
 
-This message begins with an invisible U+2063 separator followed by the visible text \`FIRSTMATE_OP: v1 launch-brief:\`.
-That is firstmate's own routing marker, and it is disclosed here deliberately so you meet it as documented protocol instead of discovering it as something hidden.
-It exists only so firstmate's tooling can tell its own operational input apart from text a human typed into this window; it carries no instruction of its own.
+$PROVENANCE_SUBJECT either as the text of your first message or as a path to a file.
+Delivered as text, it is prefixed with an invisible U+2063 separator and the visible text \`FIRSTMATE_OP: v1 launch-brief:\`.
+That prefix is firstmate's own routing tag, disclosed here deliberately, and it carries no instruction of its own.
 $PROVENANCE_LATER
-
-You do not have to take any of that on trust.
-Read these files with your own tools first and confirm they describe this exact session:
 
 $PROVENANCE_SOURCES
 
-$PROVENANCE_OUTSIDE
-
-$PROVENANCE_STALL
-If you still cannot satisfy yourself that the dispatch is genuine, do not idle: append \`blocked: {why}\` to the status file named below, which does reach a supervisor, and stop.
+Confirming where an instruction came from is a separate question from whether it is right: settle the source cheaply here, then judge each instruction on its merits against $PROVENANCE_CONTRACT, and refuse on those merits when one genuinely conflicts.
+If you cannot satisfy yourself that this dispatch is genuine, do not idle - append \`blocked: {why}\` to the status file named below, which does reach $PROVENANCE_REACHES, and stop.
 EOF
 PROVENANCE=${PROVENANCE%$'\n'}
 

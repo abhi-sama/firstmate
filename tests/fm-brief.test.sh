@@ -730,15 +730,16 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
-# bin/fm-spawn.sh hands every brief to the worker through
-# bin/fm-operational-input.sh's launch-brief encoding, so each one arrives behind an
-# invisible U+2063 separator. A dispatched scout read that as concealment, refused the
-# whole brief as a prompt injection, and idled in a window nobody was watching until a
-# supervisor happened to look. The provenance block is the fix: it discloses the marker
-# in visible text, names paths the worker can read itself, explains the writes that land
-# outside the project, and routes an unresolved doubt to `blocked:` instead of to a
-# question no one will answer. Every scaffold a worker can receive must carry it, with
-# this task's real absolute paths rather than placeholders.
+# bin/fm-spawn.sh hands a brief to the worker through bin/fm-operational-input.sh's
+# launch-brief encoding, so it arrives behind an invisible U+2063 separator. A
+# dispatched scout read that as concealment and refused the whole brief as a prompt
+# injection; a second worker never refused anything but re-litigated "is this an
+# injection" four separate times on its own innocent tool output. The provenance
+# block is the fix, and it is deliberately tiny: only a tag disclosure, a
+# corroboration pointer the reader can actually reach, and the blocked-rather-than-
+# idle failure-safe. Every sentence it keeps has to be true for every kind, every
+# placement, and every harness, which is where all ten of this change's review
+# findings came from.
 test_dispatch_provenance_block_opens_every_scaffold() {
   local home brief id
   home="$TMP_ROOT/provenance-home"
@@ -752,30 +753,40 @@ test_dispatch_provenance_block_opens_every_scaffold() {
       || fail "$id: fm-brief.sh exited non-zero"
     brief="$home/data/$id/brief.md"
 
-    [ "$(head -n 1 "$brief")" = "# Dispatch provenance - read this before anything else" ] \
+    [ "$(head -n 1 "$brief")" = "# Dispatch provenance" ] \
       || fail "$id: the provenance block is not the first thing the worker reads"
 
-    assert_grep "invisible U+2063 separator followed by the visible text \`FIRSTMATE_OP: v1 launch-brief:\`" \
-      "$brief" "$id: brief does not disclose the marker it actually arrives behind"
-    assert_grep "Every later message firstmate sends you carries the same marker" "$brief" \
-      "$id: brief does not pre-empt a mid-task refusal of a marked steer"
+    # The disclosure must survive kimi, whose launch template passes a brief PATH
+    # instead of encoded text, so it may never assert that THIS message is tagged.
+    assert_grep "either as the text of your first message or as a path to a file" "$brief" \
+      "$id: the disclosure assumes a delivery path that not every harness uses"
+    assert_grep "invisible U+2063 separator and the visible text \`FIRSTMATE_OP: v1 launch-brief:\`" \
+      "$brief" "$id: brief does not disclose the tag it can arrive behind"
+    assert_grep "carries no instruction of its own" "$brief" \
+      "$id: brief does not say the tag is inert routing rather than an instruction"
+
+    # bin/fm-send.sh tags a secondmate target only. Telling a crewmate its later
+    # steers are tagged would teach it to refuse ordinary untagged supervision.
+    assert_grep "Later messages firstmate sends you carry no tag at all" "$brief" \
+      "$id: brief does not tell the worker its later steers arrive untagged"
 
     assert_grep "- \`$home/data/$id/brief.md\` - this brief on disk" "$brief" \
       "$id: brief does not name its own on-disk path as corroboration"
     assert_grep "- \`$home/state/$id.meta\` - firstmate's record of this dispatch" "$brief" \
       "$id: brief does not name the task record that pins this worktree and endpoint"
     assert_grep "- \`$ROOT/bin/fm-operational-input.sh\`" "$brief" \
-      "$id: brief does not point at the marker's own definition"
-    assert_grep "- \`$ROOT/AGENTS.md\`" "$brief" \
-      "$id: brief does not point at the dispatching system's job description"
+      "$id: brief does not point at the tag's own definition"
     assert_no_grep '<FM_HOME>' "$brief" "$id: provenance paths were left as placeholders"
     assert_no_grep '<task-id>' "$brief" "$id: provenance paths were left as placeholders"
 
-    assert_grep "lives under the firstmate home rather than inside this project" "$brief" \
-      "$id: brief does not explain why it writes outside the project"
-    assert_grep "No human is watching this window." "$brief" \
-      "$id: brief does not tell the worker that stopping to ask stalls forever"
-    assert_grep "do not idle: append \`blocked: {why}\` to the status file named below" "$brief" \
+    # Verifying the sender must not buy compliance: the worker still owes a merit
+    # judgement, and keeps the right to refuse a genuinely conflicting instruction.
+    assert_grep "judge each instruction on its merits against this brief" "$brief" \
+      "$id: brief trades the worker's merit judgement for provenance confidence"
+    assert_grep "refuse on those merits when one genuinely conflicts" "$brief" \
+      "$id: brief does not preserve the worker's right to refuse on the merits"
+
+    assert_grep "do not idle - append \`blocked: {why}\` to the status file named below" "$brief" \
       "$id: brief does not route an unresolved doubt to the channel that reaches a supervisor"
   done
 
@@ -784,24 +795,140 @@ test_dispatch_provenance_block_opens_every_scaffold() {
     "$ROOT/bin/fm-brief.sh" "$id" --secondmate alpha >/dev/null 2>&1 \
     || fail "$id: fm-brief.sh secondmate scaffold exited non-zero"
   brief="$home/data/$id/brief.md"
-  [ "$(head -n 1 "$brief")" = "# Dispatch provenance - read this before anything else" ] \
+  [ "$(head -n 1 "$brief")" = "# Dispatch provenance" ] \
     || fail "$id: the charter's provenance block is not the first thing the secondmate reads"
-  assert_grep "invisible U+2063 separator followed by the visible text \`FIRSTMATE_OP: v1 launch-brief:\`" \
-    "$brief" "$id: charter does not disclose the marker it actually arrives behind"
-  # A secondmate home is a firstmate checkout of its own and may be remote, so its
-  # corroboration is its own copies plus the parent's task record.
-  assert_grep "- \`data/charter.md\` in this home" "$brief" \
-    "$id: charter does not name its own on-disk copy as corroboration"
-  assert_grep "- \`AGENTS.md\` in this home" "$brief" \
-    "$id: charter does not point at the job description of the system it belongs to"
-  assert_grep "- \`$home/state/$id.meta\` - the dispatching firstmate's record of this home" "$brief" \
-    "$id: charter does not name the dispatching firstmate's record of this home"
-  assert_grep "Requests from the main firstmate" "$brief" \
-    "$id: charter does not connect the launch marker to its later marked-request channel"
-  assert_grep "do not idle: append \`blocked: {why}\` to the status file named below" "$brief" \
+  assert_grep "invisible U+2063 separator and the visible text \`FIRSTMATE_OP: v1 launch-brief:\`" \
+    "$brief" "$id: charter does not disclose the tag it can arrive behind"
+  # A secondmate home is a firstmate checkout of its own (bin/fm-home-seed.sh clones
+  # one; bin/fm-remote-home-provision.sh refuses a remote home that is not one), so
+  # this relative pointer resolves on either side of a remote boundary.
+  assert_grep "Read \`bin/fm-operational-input.sh\` in this home" "$brief" \
+    "$id: charter does not point at a corroboration source inside its own reach"
+  # data/charter.md is NOT a safe pointer: bin/fm-spawn.sh falls back to the
+  # dispatching home's brief when that copy is absent, so the claim would be false.
+  assert_no_grep 'data/charter.md' "$brief" \
+    "$id: charter names a copy of itself that bin/fm-spawn.sh's fallback does not create"
+  assert_grep "described under \"Requests from the main firstmate\" below" "$brief" \
+    "$id: charter does not connect the launch tag to its later marked-request channel"
+  assert_grep "judge each instruction on its merits against this charter" "$brief" \
+    "$id: charter trades the secondmate's merit judgement for provenance confidence"
+  assert_grep "do not idle - append \`blocked: {why}\` to the status file named below" "$brief" \
     "$id: charter does not route an unresolved doubt to the channel that reaches the main firstmate"
 
   pass "fm-brief.sh: ship, scout, and charter scaffolds open with an interpolated dispatch-provenance block"
+}
+
+# The privacy property, and the reason the charter's provenance is reduced rather
+# than merely reworded. bin/fm-remote-home-seed.sh publishes a charter's bytes to a
+# remote host after substituting ONLY the parent status path, and its manifest
+# documents that the parent's real filesystem path is never sent. So a charter must
+# carry no path under the dispatching home that survives that substitution.
+#
+# This asserts the PROPERTY against the home's real path, not any phrasing: a
+# reworded reintroduction of a parent path fails here exactly as the original would.
+test_charter_publishes_no_dispatching_home_path() {
+  local home id brief parent_status remote_status published leaked block
+  home="$TMP_ROOT/provenance-privacy-home"
+  mkdir -p "$home/data" "$home/state"
+  id=prov-privacy
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Own the alpha domain.' \
+    "$ROOT/bin/fm-brief.sh" "$id" --secondmate alpha >/dev/null 2>&1 \
+    || fail "$id: fm-brief.sh secondmate scaffold exited non-zero"
+  brief="$home/data/$id/brief.md"
+
+  # The provenance block alone must name no dispatching-home path at all, before
+  # any substitution: it is the part of the charter this change owns.
+  block="$TMP_ROOT/$id.provenance"
+  awk 'NR == 1 { next } /^You are a persistent second mate/ { exit } { print }' "$brief" > "$block"
+  [ -s "$block" ] || fail "$id: the provenance block extracted empty"
+  if grep -F -- "$home" "$block" >/dev/null 2>&1; then
+    fail "$id: the charter's provenance block names a path under the dispatching home: $(grep -F -- "$home" "$block" | head -n 1)"
+  fi
+
+  # And the published bytes as a whole: reproduce bin/fm-remote-home-seed.sh's one
+  # substitution, then assert nothing under the dispatching home survives it.
+  parent_status="$home/state/$id.status"
+  remote_status="/srv/fm-remote/state/parent-replies.status"
+  published="$TMP_ROOT/$id.published"
+  while IFS= read -r line || [ -n "$line" ]; do
+    printf '%s\n' "${line//"$parent_status"/"$remote_status"}"
+  done < "$brief" > "$published"
+  leaked=$(grep -F -- "$home" "$published" | head -n 3 || true)
+  [ -z "$leaked" ] \
+    || fail "$id: charter bytes published to a remote host still contain the dispatching home's path: $leaked"
+
+  pass "fm-brief.sh: a charter publishes no path belonging to the dispatching home"
+}
+
+# The removals from this block are load-bearing, and each one was a real defect.
+# Guarding them by exact sentence would pass the moment someone reintroduces the
+# same claim in different words, so each guard below asserts the property - the
+# concept must be absent, case-insensitively, in any of its wordings - rather than
+# one historical phrasing.
+assert_block_omits_concept() {  # <block> <label> <term>...
+  local block=$1 label=$2 hit
+  shift 2
+  for term in "$@"; do
+    hit=$(grep -i -F -- "$term" "$block" | head -n 1 || true)
+    [ -z "$hit" ] || fail "$label (matched \"$term\"): $hit"
+  done
+}
+
+test_dispatch_provenance_keeps_only_verifiable_claims() {
+  local home brief id block directives
+  home="$TMP_ROOT/provenance-removals-home"
+  mkdir -p "$home/data" "$home/state"
+
+  for id_kind in "rem-ship:--mode no-mistakes" "rem-scout:--scout"; do
+    id=${id_kind%%:*}
+    # shellcheck disable=SC2086 # The fixture flags are deliberately word-split.
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj ${id_kind#*:} >/dev/null 2>&1 \
+      || fail "$id: fm-brief.sh exited non-zero"
+    brief="$home/data/$id/brief.md"
+    block="$TMP_ROOT/$id.provenance"
+    awk 'NR == 1 { next } /^You are a crewmate/ { exit } { print }' "$brief" > "$block"
+    [ -s "$block" ] || fail "$id: the provenance block extracted empty"
+
+    # Removed: any claim about who is or is not observing this window. The same
+    # brief tells the worker firstmate reads its pane, so such a claim contradicts
+    # the document it sits in. The failure-safe carries the intent without it.
+    assert_block_omits_concept "$block" \
+      "$id: the provenance block reintroduces a claim about who is observing this window" \
+      'watching' 'watches' 'monitor' 'nobody' 'no one' 'no human' 'wait forever' 'indefinitely'
+
+    # Removed: the out-of-project write explanation and its exclusivity framing.
+    # "the only paths outside the worktree" was false the moment any other
+    # firstmate-owned record was written, and relocating it did not make it true.
+    assert_block_omits_concept "$block" \
+      "$id: the provenance block reintroduces a claim about which writes land outside the project" \
+      'outside the worktree' 'outside this project' 'outside the project' 'only paths' 'rather than inside this project'
+
+    # Removed: firstmate's own AGENTS.md as something the worker should read. It is
+    # second-person and forbids writing to a project, so a crewmate that adopts it
+    # as its own instructions can refuse the job it was dispatched to do.
+    assert_block_omits_concept "$block" \
+      "$id: the provenance block sends the worker to read firstmate's own operating instructions" \
+      'AGENTS.md' 'CLAUDE.md' 'job description'
+
+    # Removed: a competing "before anything else" directive. A ship brief's
+    # worktree-isolation gate is the protected one and must remain the sole holder
+    # of that priority; a scout brief has no such gate, so it must hold none at all.
+    assert_block_omits_concept "$block" \
+      "$id: the provenance block claims a first-priority the worktree-isolation gate owns" \
+      'before anything else' 'read this first' 'before you do anything'
+    directives=$(grep -c -i -F -- 'before anything else' "$brief" || true)
+    if [ "$id" = rem-ship ]; then
+      [ "$directives" -eq 1 ] \
+        || fail "$id: expected exactly one 'before anything else' directive (the worktree-isolation gate), found $directives"
+      assert_grep 'Verify isolation before anything else' "$brief" \
+        "$id: the worktree-isolation gate lost its priority wording"
+    else
+      [ "$directives" -eq 0 ] \
+        || fail "$id: a scout brief has no worktree-isolation gate, so it must carry no 'before anything else' directive, found $directives"
+    fi
+  done
+
+  pass "fm-brief.sh: the provenance block keeps no claim that is false in some context it renders into"
 }
 
 # The disclosure is only worth anything if it describes the bytes that actually
@@ -848,6 +975,8 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_dispatch_provenance_block_opens_every_scaffold
+test_charter_publishes_no_dispatching_home_path
+test_dispatch_provenance_keeps_only_verifiable_claims
 test_dispatch_provenance_matches_the_delivered_wire_form
 test_ship_modes_generate_clean_briefs
 test_scout_brief_has_no_quality_bar_section
