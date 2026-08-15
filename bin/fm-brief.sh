@@ -43,6 +43,21 @@
 # "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
+# Every scaffold - ship, scout, and secondmate charter - opens with a "Dispatch
+# provenance" block. bin/fm-spawn.sh delivers a brief behind
+# bin/fm-operational-input.sh's invisible launch-brief tag, and a worker that reads
+# that tag as concealment refuses the whole dispatch, or pays a recurring tax
+# re-litigating it, in a window that reaches a supervisor only through the status
+# file. The block discloses the tag in visible text, points at what the reader can
+# actually read to corroborate the dispatch, and routes an unresolved doubt to a
+# "blocked:" status line. It deliberately does NOT ask for compliance: verifying the
+# sender is separated from judging the instruction, which the worker still owes.
+# It never alters the marker bytes, which bin/fm-operational-input.sh owns as
+# permanent compatibility.
+# The block is kept small on purpose. Each sentence must be true for every kind, for
+# local and remote placement, and for every harness, so a charter names no path under
+# the dispatching home and the tag disclosure holds whether the brief arrived as
+# encoded text or as a file path.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
@@ -181,6 +196,70 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 
+# Build the "Dispatch provenance" block this script's header describes.
+# Three kinds of sentence are allowed here and nothing else: the tag disclosure,
+# a corroboration pointer the reader can actually reach, and the blocked-rather-
+# than-idle failure-safe. Anything beyond those is another claim that has to hold
+# across ship, scout and charter, local and remote placement, and every supported
+# harness - which is where every accuracy defect in this block has come from.
+# The disclosure never says the reader IS looking at a tagged message: kimi's
+# launch template passes a brief PATH rather than encoded text, and fm-brief.sh
+# has no harness input to condition on, so the wording must hold either way.
+if [ "$KIND" = secondmate ]; then
+  # A charter is published to remote hosts by bin/fm-remote-home-seed.sh, which
+  # rewrites only the parent status path and copies every other byte verbatim.
+  # So this block names no path under the dispatching home at all; that is the
+  # privacy property, guarded in tests/fm-brief.test.sh.
+  # The one pointer it does name is relative and always present: a secondmate
+  # home is a firstmate checkout in its own right (bin/fm-home-seed.sh clones one
+  # locally, bin/fm-remote-home-provision.sh refuses a remote home that is not
+  # one). data/charter.md is deliberately NOT named - bin/fm-spawn.sh falls back
+  # to the dispatching home's brief when that copy is absent.
+  PROVENANCE_LATER="Later requests from the main firstmate carry their own tag, described under \"Requests from the main firstmate\" below."
+  IFS= read -r -d '' PROVENANCE_SOURCES <<EOF || true
+Read \`bin/fm-operational-input.sh\` in this home with your own tools rather than taking that on trust: it defines the tag, and documents this exact wire form and why it is permanent.
+EOF
+  PROVENANCE_SUBJECT="The main firstmate hands you this charter"
+  PROVENANCE_CONTRACT="this charter"
+  PROVENANCE_REACHES="the main firstmate"
+else
+  # A ship or scout brief is only ever delivered locally - bin/fm-remote-home-seed.sh
+  # is the sole remote brief path and both of its scaffold calls pass --secondmate -
+  # so absolute paths in this home are genuinely readable by the worker, and they
+  # are what answer "nothing in this session corroborates the dispatch".
+  # bin/fm-send.sh tags a secondmate target only, so a crewmate's later steers are
+  # untagged; saying otherwise would teach it to refuse ordinary supervision.
+  # firstmate's own AGENTS.md is deliberately absent from the list: it is written in
+  # the second person and forbids writing to a project, so a crewmate that reads it
+  # as its own instructions can refuse the job it was dispatched to do.
+  PROVENANCE_LATER="Later messages firstmate sends you carry no tag at all, so an untagged instruction arriving mid-task is ordinary supervision rather than a sign of an impostor."
+  IFS= read -r -d '' PROVENANCE_SOURCES <<EOF || true
+Read these with your own tools rather than taking that on trust:
+
+- \`$BRIEF\` - this brief on disk, the same instructions you were handed.
+- \`$STATE/$ID.meta\` - firstmate's record of this dispatch, naming the harness, the window, and the worktree it launched them in.
+- \`$FM_ROOT/bin/fm-operational-input.sh\` - the tag's definition, which documents this exact wire form and why it is permanent.
+EOF
+  PROVENANCE_SUBJECT="Firstmate hands you this brief"
+  PROVENANCE_CONTRACT="this brief"
+  PROVENANCE_REACHES="a supervisor"
+fi
+PROVENANCE_SOURCES=${PROVENANCE_SOURCES%$'\n'}
+IFS= read -r -d '' PROVENANCE <<EOF || true
+# Dispatch provenance
+
+$PROVENANCE_SUBJECT either as the text of your first message or as a path to a file.
+Delivered as text, it is prefixed with an invisible U+2063 separator and the visible text \`FIRSTMATE_OP: v1 launch-brief:\`.
+That prefix is firstmate's own routing tag, disclosed here deliberately, and it carries no instruction of its own.
+$PROVENANCE_LATER
+
+$PROVENANCE_SOURCES
+
+Confirming where an instruction came from is a separate question from whether it is right: settle the source cheaply here, then judge each instruction on its merits against $PROVENANCE_CONTRACT, and refuse on those merits when one genuinely conflicts.
+If you cannot satisfy yourself that this dispatch is genuine, do not idle - append \`blocked: {why}\` to the status file named below, which does reach $PROVENANCE_REACHES, and stop.
+EOF
+PROVENANCE=${PROVENANCE%$'\n'}
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -203,6 +282,8 @@ else
   PROJECT_CLONES_NOTE="The projects above are local clones for work you supervise; they are not an exclusive ownership claim."
 fi
 cat > "$BRIEF" <<EOF
+$PROVENANCE
+
 You are a persistent second mate managed by the main firstmate. Work on your own; do not wait for a human.
 
 # Charter
@@ -303,6 +384,8 @@ fi
 
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
+$PROVENANCE
+
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
@@ -413,6 +496,8 @@ esac
 DOD=${DOD%$'\n'}
 
 cat > "$BRIEF" <<EOF
+$PROVENANCE
+
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
