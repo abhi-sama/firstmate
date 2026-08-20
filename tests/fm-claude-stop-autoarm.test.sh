@@ -152,6 +152,25 @@ SH
   chmod +x "$dir/bin/fm-watch-arm.sh"
 }
 
+# Plant the single-flight owner lock exactly as fm_lock_try_create leaves it: a
+# symlink to an owner directory whose pid file names the holder. "aged" back-dates
+# that directory so the hook sees a claim held far longer than the wedge bound.
+plant_owner_lock() {  # <dir> <holder-pid> <aged|fresh>
+  local dir=$1 pid=$2 age=$3 owner
+  owner="$dir/state/.claude-autoarm.lock.owner.planted"
+  mkdir -p "$owner"
+  printf '%s\n' "$pid" > "$owner/pid"
+  printf 'autoarm\n' > "$owner/role"
+  if [ "$age" = aged ]; then
+    touch -t 202001010000 "$owner"
+  fi
+  ln -s "$owner" "$dir/state/.claude-autoarm.lock"
+}
+
+contention_record() {
+  cat "$1/state/.claude-autoarm-contended" 2>/dev/null || true
+}
+
 epoch_outcome() {
   sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$1/state/.claude-autoarm-epoch" 2>/dev/null || true
 }
@@ -532,6 +551,85 @@ test_single_flight_admits_exactly_one_owner() {
   pass "auto-arm: concurrent firings admit one owner and one rewake translation"
 }
 
+test_wedged_owner_lock_is_broken_so_supervision_recovers() {
+  local dir holder status
+  dir=$(make_primary_dir "$TMP_ROOT/wedged-owner")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  # A previous firing that claimed the owner lock, then wedged inside its
+  # foreground arm: still alive, holding for hours, with no watcher to show for it.
+  sleep 30 &
+  holder=$!
+  plant_owner_lock "$dir" "$holder" aged
+  run_autoarm "$dir" >/dev/null 2>&1; status=$?
+  kill "$holder" 2>/dev/null || true
+  expect_code 2 "$status" "a wedged owner must be taken over so the turn still rewakes"
+  [ -e "$dir/state/arm-ran" ] \
+    || fail "supervision never armed: the wedged owner lock silently blocked this firing"
+  case "$(contention_record "$dir")" in
+    *outcome=broken*) : ;;
+    *) fail "the takeover was not recorded, got: '$(contention_record "$dir")'" ;;
+  esac
+  [ ! -e "$dir/state/.claude-autoarm.lock" ] || fail "owner lock must be released after the cycle"
+  pass "auto-arm: a live owner wedged with no watcher is taken over and supervision arms"
+}
+
+test_fresh_live_owner_is_never_double_claimed() {
+  local dir holder status
+  dir=$(make_primary_dir "$TMP_ROOT/fresh-owner")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  # A genuine concurrent firing that claimed the lock moments ago.
+  sleep 30 &
+  holder=$!
+  plant_owner_lock "$dir" "$holder" fresh
+  run_autoarm "$dir" >/dev/null 2>&1; status=$?
+  kill "$holder" 2>/dev/null || true
+  expect_code 0 "$status" "a fresh concurrent owner must be left to finish its own cycle"
+  [ ! -e "$dir/state/arm-ran" ] || fail "a live concurrent owner was double-claimed and armed twice"
+  [ -L "$dir/state/.claude-autoarm.lock" ] || fail "a live concurrent owner's lock was removed"
+  [ ! -e "$dir/state/.claude-autoarm-contended" ] \
+    || fail "a benign concurrent deferral must not be recorded as an abnormal refusal"
+  pass "auto-arm: a fresh live owner still refuses a second claim, with no double-arm"
+}
+
+test_long_held_owner_with_healthy_watcher_is_left_alone() {
+  local dir holder watcher identity status
+  dir=$(make_primary_dir "$TMP_ROOT/long-healthy-owner")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  # A legitimately long watch cycle: the owner has held for hours BECAUSE its
+  # watcher is alive and beating. Age alone must never break this.
+  sleep 30 &
+  watcher=$!
+  identity=$(watcher_identity "$dir" "$watcher")
+  record_watcher_lock "$dir" "$watcher" "$identity"
+  : > "$dir/state/.last-watcher-beat"
+  sleep 30 &
+  holder=$!
+  plant_owner_lock "$dir" "$holder" aged
+  run_autoarm "$dir" >/dev/null 2>&1; status=$?
+  kill "$holder" "$watcher" 2>/dev/null || true
+  expect_code 0 "$status" "a long-held owner backed by a healthy watcher must be left alone"
+  [ ! -e "$dir/state/arm-ran" ] || fail "a healthy long watch cycle was broken and re-armed"
+  [ -L "$dir/state/.claude-autoarm.lock" ] || fail "a healthy long-held owner's lock was removed"
+  pass "auto-arm: a long-held owner with a healthy watcher keeps its claim"
+}
+
+test_unresolvable_owner_lock_is_never_read_as_wedged() {
+  local dir status
+  dir=$(make_primary_dir "$TMP_ROOT/dangling-owner")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  # A lock pointing at an owner directory that no longer exists. Age cannot be
+  # read from it, and it must never be treated as an arbitrarily old claim.
+  ln -s "$dir/state/.claude-autoarm.lock.owner.gone" "$dir/state/.claude-autoarm.lock"
+  run_autoarm "$dir" >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "an unresolvable owner lock must leave the hook inert, not trigger a takeover"
+  [ ! -e "$dir/state/arm-ran" ] || fail "an unresolvable owner lock was treated as a wedged owner and broken"
+  pass "auto-arm: an owner lock whose age cannot be read is never mistaken for a wedged claim"
+}
+
 test_need_vanished_mid_cycle_closes_quietly() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/vanished")
@@ -593,6 +691,10 @@ test_benign_cycle_end_with_live_watcher_is_silent
 test_positive_recovery_budget_contention_preserves_episode
 test_arms_for_x_mode_poll_need_without_inflight
 test_single_flight_admits_exactly_one_owner
+test_wedged_owner_lock_is_broken_so_supervision_recovers
+test_fresh_live_owner_is_never_double_claimed
+test_long_held_owner_with_healthy_watcher_is_left_alone
+test_unresolvable_owner_lock_is_never_read_as_wedged
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home

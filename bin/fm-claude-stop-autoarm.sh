@@ -23,7 +23,12 @@
 #   - Single-flight: Claude does not dedupe async hooks, so a home-scoped owner
 #     lock (state/.claude-autoarm.lock) admits exactly one owner; every other
 #     concurrent firing exits 0 without translating, which keeps one event
-#     epoch on exactly one recovery turn.
+#     epoch on exactly one recovery turn. A DEAD owner is reclaimed by
+#     fm_lock_try_acquire; an owner that is still alive but wedged inside its own
+#     foreground arm is taken over here, under the narrow test below, because it
+#     would otherwise hold the claim forever and silence every later firing.
+#     A refusal this hook could not resolve, and a takeover it performed, are
+#     recorded in state/.claude-autoarm-contended so neither is invisible.
 #   - Foreground arm: the owner runs bin/fm-watch-arm.sh in the FOREGROUND of
 #     this hook-owned process tree (never shell &); Claude owns the process
 #     group, so its timeout/session teardown kills arm and watcher together.
@@ -64,11 +69,20 @@ OWNER_LOCK="$STATE/.claude-autoarm.lock"
 EPOCH="$STATE/.claude-autoarm-epoch"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
+CONTENDED="$STATE/.claude-autoarm-contended"
 AUTOARM_ATTEMPTS=${FM_CLAUDE_AUTOARM_ATTEMPTS:-2}
 case "$AUTOARM_ATTEMPTS" in
   1|2|3) : ;;
   *) AUTOARM_ATTEMPTS=2 ;;
 esac
+# How long an owner may hold the single-flight lock before this hook will even
+# consider it wedged. Kept strictly above GRACE so a watcher that the current
+# owner has only just started is never mistaken for an owner with no watcher.
+OWNER_WEDGE_AFTER=${FM_CLAUDE_AUTOARM_WEDGE_AFTER:-900}
+case "$OWNER_WEDGE_AFTER" in
+  ''|*[!0-9]*) OWNER_WEDGE_AFTER=900 ;;
+esac
+[ "$OWNER_WEDGE_AFTER" -gt "$GRACE" ] || OWNER_WEDGE_AFTER=$((GRACE * 3))
 
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
@@ -124,7 +138,63 @@ fi
 # Claude runs one background process per firing with no dedupe. Exactly one
 # owner foregrounds the arm and translates its close; every other firing exits
 # 0 so one watcher cycle maps to at most one exit-2 rewake.
-fm_lock_try_acquire "$OWNER_LOCK" || exit 0
+#
+# fm_lock_try_acquire already reclaims a demonstrably dead owner. The remaining
+# way this claim can block forever is an owner that is still ALIVE but wedged
+# inside its own foreground arm: the watcher it was supposed to produce died
+# under it, so it never returns, never releases, and every later firing exits 0
+# in silence until an operator arms by hand.
+#
+# The wedge test is deliberately narrow, because a HEALTHY cycle also holds this
+# lock for hours while its watcher waits for a wake. An owner counts as wedged
+# only when it has held past OWNER_WEDGE_AFTER, is still alive, and has no live
+# identity-matched watcher with a fresh beacon to show for it. A long cycle
+# backed by a beating watcher keeps its claim, and so does a fresh concurrent
+# firing; only a claim with nothing supervising behind it is taken over.
+record_contention() {  # <holder-pid> <held-seconds> <outcome>
+  local tmp
+  tmp="$CONTENDED.tmp.$$"
+  printf 'pid=%s held_for=%s outcome=%s updated_at=%s\n' \
+    "$1" "$2" "$3" "$(date +%s)" > "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$CONTENDED" 2>/dev/null
+  rm -f "$tmp" 2>/dev/null || true
+}
+
+owner_is_wedged() {  # <holder-pid> <held-seconds>
+  local pid=$1 held=$2
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  case "$held" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$held" -ge "$OWNER_WEDGE_AFTER" ] || return 1
+  fm_pid_alive "$pid" || return 1
+  ! fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"
+}
+
+# True when this firing owns the single-flight lock. A refusal that resolves
+# itself - a concurrent firing losing an ordinary race, or an owner this hook
+# cannot prove wedged - stays silent, exactly as before.
+claim_owner_lock() {
+  local held_pid held_for
+  if fm_lock_try_acquire "$OWNER_LOCK"; then
+    rm -f "$CONTENDED" 2>/dev/null || true
+    return 0
+  fi
+  held_pid=${FM_LOCK_HELD_PID:-}
+  held_for=$(fm_lock_owner_held_for "$OWNER_LOCK") || return 1
+  owner_is_wedged "$held_pid" "$held_for" || return 1
+  if ! fm_lock_break_wedged_owner "$OWNER_LOCK" "$held_pid" \
+    || ! fm_lock_try_acquire "$OWNER_LOCK"; then
+    record_contention "$held_pid" "$held_for" stuck
+    return 1
+  fi
+  record_contention "$held_pid" "$held_for" broken
+  return 0
+}
+
+claim_owner_lock || exit 0
 if ! fm_lock_set_role "$OWNER_LOCK" autoarm; then
   fm_lock_release "$OWNER_LOCK"
   exit 0

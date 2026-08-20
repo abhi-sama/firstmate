@@ -712,6 +712,59 @@ fm_lock_try_acquire() {
   return "$rc"
 }
 
+# Break a lock whose recorded owner is STILL ALIVE but has been proven wedged by
+# the caller's own domain evidence, so supervision can be taken over instead of
+# blocked forever. fm_lock_try_acquire already recovers a DEAD owner; this is the
+# separate live-but-stuck case, which no generic liveness test can detect.
+#
+# The caller passes the exact pid it observed holding the lock, and the break is
+# refused unless that pid still owns it, so a lock that changed hands between the
+# observation and the break is never removed. The wedged process is left running:
+# fm_lock_release only removes a lock that still points at the releaser's own owner
+# directory, so when that process finally exits it cannot take a successor's lock
+# with it.
+#
+# Proving the wedge is the CALLER's job and must never be reduced to age alone.
+# bin/fm-claude-stop-autoarm.sh is the only caller; see its owner-wedge contract.
+fm_lock_break_wedged_owner() {  # <lockdir> <expected-owner-pid>
+  local lockdir=$1 expected=$2 ownerdir actual
+  case "$expected" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if [ -L "$lockdir" ]; then
+    ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
+    [ -n "$ownerdir" ] || return 1
+    actual=$(cat "$ownerdir/pid" 2>/dev/null || true)
+    [ "$actual" = "$expected" ] || return 1
+    fm_lock_points_to_owner "$lockdir" "$ownerdir" || return 1
+    rm -f "$lockdir" 2>/dev/null || return 1
+    fm_lock_discard_owner "$ownerdir"
+    return 0
+  fi
+  [ -d "$lockdir" ] || return 1
+  actual=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ "$actual" = "$expected" ] || return 1
+  fm_lock_clean_known_files "$lockdir"
+  rmdir "$lockdir" 2>/dev/null
+}
+
+# Seconds since the current owner claimed <lockdir>, measured on the owner
+# DIRECTORY rather than the lock symlink because the two platforms' stat
+# semantics differ on links: BSD stat reports the link itself, GNU stat follows
+# it. Returns 1 when no owner can be resolved, so a caller can never read an
+# unresolvable lock as an arbitrarily old one.
+fm_lock_owner_held_for() {  # <lockdir>
+  local lockdir=$1 ownerdir
+  if [ -L "$lockdir" ]; then
+    ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
+    [ -n "$ownerdir" ] && [ -d "$ownerdir" ] || return 1
+    fm_path_age "$ownerdir"
+    return 0
+  fi
+  [ -d "$lockdir" ] || return 1
+  fm_path_age "$lockdir"
+}
+
 fm_lock_acquire_wait() {
   local lockdir=$1
   while ! fm_lock_try_acquire "$lockdir"; do
