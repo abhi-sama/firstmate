@@ -1162,6 +1162,32 @@ EOF
   pass "orphan status logs are printed once with bounded tails"
 }
 
+test_autoarm_contention_record_is_surfaced_and_silent_when_absent() {
+  local rec root home fakebin out
+  rec=$(new_world autoarm-contention)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  # Absent is the ordinary case: the digest must say nothing at all about it.
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" "Watcher auto-arm claim" \
+    "digest invented an auto-arm claim section with no record on disk"
+
+  # A recorded takeover is the whole point of the record: it must reach a human.
+  printf 'pid=4242 held_for=3600 outcome=broken updated_at=1700000000\n' \
+    > "$home/state/.claude-autoarm-contended"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "Watcher auto-arm claim" "digest did not label the recorded auto-arm claim"
+  assert_contains "$out" "outcome=broken updated_at=1700000000" \
+    "digest did not print the recorded claim itself"
+  assert_contains "$out" "pid=4242" "digest dropped the recorded holder identity"
+
+  pass "session start surfaces a recorded auto-arm owner claim and stays silent without one"
+}
+
 # --- session-start secondmate recovery boundary -----------------------------
 
 test_session_start_relaunches_missing_pi_secondmate() {
@@ -2418,6 +2444,7 @@ test_session_start_relaunches_herdr_husk_secondmate
 test_status_tail_bounding
 test_status_tail_line_cap
 test_orphan_status_logs_are_printed
+test_autoarm_contention_record_is_surfaced_and_silent_when_absent
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts

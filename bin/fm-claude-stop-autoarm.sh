@@ -23,7 +23,18 @@
 #   - Single-flight: Claude does not dedupe async hooks, so a home-scoped owner
 #     lock (state/.claude-autoarm.lock) admits exactly one owner; every other
 #     concurrent firing exits 0 without translating, which keeps one event
-#     epoch on exactly one recovery turn.
+#     epoch on exactly one recovery turn. A DEAD owner is reclaimed by
+#     fm_lock_try_acquire; an owner that is still alive but wedged inside its own
+#     foreground arm is taken over here, under the narrow test below, because it
+#     would otherwise hold the claim forever and silence every later firing.
+#     A takeover it performed, and a claim it could not break at all, are
+#     recorded in state/.claude-autoarm-contended so neither is invisible; every
+#     ordinary race stays silent, and the record is cleared only once a watcher
+#     beat inside the grace window shows supervision came back, never by the next
+#     successful claim. The session-start digest (bin/fm-session-start.sh) is
+#     that record's one reader, and reads it without clearing it. A taken-over
+#     owner that later resumes is dispossessed: it writes no epoch, resets no
+#     failure state, and emits no rewake, so one cycle keeps one writer.
 #   - Foreground arm: the owner runs bin/fm-watch-arm.sh in the FOREGROUND of
 #     this hook-owned process tree (never shell &); Claude owns the process
 #     group, so its timeout/session teardown kills arm and watcher together.
@@ -64,11 +75,20 @@ OWNER_LOCK="$STATE/.claude-autoarm.lock"
 EPOCH="$STATE/.claude-autoarm-epoch"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
+CONTENDED="$STATE/.claude-autoarm-contended"
 AUTOARM_ATTEMPTS=${FM_CLAUDE_AUTOARM_ATTEMPTS:-2}
 case "$AUTOARM_ATTEMPTS" in
   1|2|3) : ;;
   *) AUTOARM_ATTEMPTS=2 ;;
 esac
+# How long an owner may hold the single-flight lock before this hook will even
+# consider it wedged. Kept strictly above GRACE so a watcher that the current
+# owner has only just started is never mistaken for an owner with no watcher.
+OWNER_WEDGE_AFTER=${FM_CLAUDE_AUTOARM_WEDGE_AFTER:-900}
+case "$OWNER_WEDGE_AFTER" in
+  ''|*[!0-9]*) OWNER_WEDGE_AFTER=900 ;;
+esac
+[ "$OWNER_WEDGE_AFTER" -gt "$GRACE" ] || OWNER_WEDGE_AFTER=$((GRACE * 3))
 
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
@@ -124,12 +144,116 @@ fi
 # Claude runs one background process per firing with no dedupe. Exactly one
 # owner foregrounds the arm and translates its close; every other firing exits
 # 0 so one watcher cycle maps to at most one exit-2 rewake.
-fm_lock_try_acquire "$OWNER_LOCK" || exit 0
+#
+# fm_lock_try_acquire already reclaims a demonstrably dead owner. The remaining
+# way this claim can block forever is an owner that is still ALIVE but wedged
+# inside its own foreground arm: the watcher it was supposed to produce died
+# under it, so it never returns, never releases, and every later firing exits 0
+# in silence until an operator arms by hand.
+#
+# The wedge test is deliberately narrow, because a HEALTHY cycle also holds this
+# lock for hours while its watcher waits for a wake. An owner counts as wedged
+# only when it has held past OWNER_WEDGE_AFTER, is still alive, and has no live
+# identity-matched watcher with a fresh beacon to show for it. A long cycle
+# backed by a beating watcher keeps its claim, and so does a fresh concurrent
+# firing; only a claim with nothing supervising behind it is taken over.
+record_contention() {  # <holder-pid> <held-seconds> <outcome>
+  local tmp
+  tmp="$CONTENDED.tmp.$$"
+  printf 'pid=%s held_for=%s outcome=%s updated_at=%s\n' \
+    "$1" "$2" "$3" "$(date +%s)" > "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$CONTENDED" 2>/dev/null
+  rm -f "$tmp" 2>/dev/null || true
+}
+
+# Evidence that supervision actually came back. This hook's model arms the
+# watcher at turn end and that watcher exits on its wake, so at the next Stop
+# there is normally no watcher PROCESS left to find - only the beat it left
+# behind. A beacon beaten inside the grace window is therefore the model-correct
+# signal here, while the pid-strict predicate below stays pid-strict, because a
+# leftover beacon must never excuse a claim with nothing running behind it.
+supervision_recently_beat() {
+  local age
+  age=$(fm_path_age "$STATE/.last-watcher-beat")
+  case "$age" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$age" -lt "$GRACE" ]
+}
+
+owner_is_wedged() {  # <holder-pid> <held-seconds>
+  local pid=$1 held=$2
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  case "$held" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$held" -ge "$OWNER_WEDGE_AFTER" ] || return 1
+  fm_pid_alive "$pid" || return 1
+  ! fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"
+}
+
+# True when this firing owns the single-flight lock. A refusal that resolves
+# itself - a concurrent firing losing an ordinary race, or an owner this hook
+# cannot prove wedged - stays silent, exactly as before.
+#
+# An ordinary acquire does NOT clear a recorded takeover or unresolved claim:
+# this hook fires on every Stop, so clearing on any successful claim would erase
+# the record seconds after it was written and leave the failure invisible again.
+# The record survives until a watcher beat inside the grace window shows that
+# supervision came back, and while an owner is wedged with nothing supervising
+# that beacon goes stale and the record is kept.
+claim_owner_lock() {
+  local held_pid held_for broke
+  if fm_lock_try_acquire "$OWNER_LOCK"; then
+    if supervision_recently_beat; then
+      rm -f "$CONTENDED" 2>/dev/null || true
+    fi
+    return 0
+  fi
+  held_pid=${FM_LOCK_HELD_PID:-}
+  held_for=$(fm_lock_owner_held_for "$OWNER_LOCK") || return 1
+  owner_is_wedged "$held_pid" "$held_for" || return 1
+  # Only a GENUINE break failure - that owner still holds the lock and it could
+  # not be removed - is an unresolved claim worth recording. Both ways a peer
+  # firing can beat this one to the same wedged owner are ordinary races that
+  # armed supervision anyway, and stay silent like every other lost race: the
+  # break finding the claim already moved on (exit 2), and losing the re-acquire
+  # after a successful break.
+  fm_lock_break_wedged_owner "$OWNER_LOCK" "$held_pid" && broke=0 || broke=$?
+  case "$broke" in
+    0) : ;;
+    2) return 1 ;;
+    *) record_contention "$held_pid" "$held_for" stuck; return 1 ;;
+  esac
+  fm_lock_try_acquire "$OWNER_LOCK" || return 1
+  record_contention "$held_pid" "$held_for" broken
+  return 0
+}
+
+claim_owner_lock || exit 0
+CLAIM_OWNER_DIR=${FM_LOCK_OWNER_DIR:-}
 if ! fm_lock_set_role "$OWNER_LOCK" autoarm; then
   fm_lock_release "$OWNER_LOCK"
   exit 0
 fi
 trap 'fm_lock_release "$OWNER_LOCK"' EXIT
+
+# The takeover above removes a wedged owner's claim but deliberately leaves that
+# process running, so this hook must never assume it still holds what it claimed.
+# A dispossessed owner that finally resumes - a blocked arm waking after the
+# machine slept - would otherwise bump the epoch its successor now owns, clear
+# the successor's failure markers, and emit a second rewake banner for a single
+# watcher cycle. The epoch ledger has one writer only while this holds.
+still_owns_claim() {
+  local pid
+  if [ -n "$CLAIM_OWNER_DIR" ] && [ -L "$OWNER_LOCK" ]; then
+    fm_lock_points_to_owner "$OWNER_LOCK" "$CLAIM_OWNER_DIR" || return 1
+  fi
+  pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
+  [ "$pid" = "${BASHPID:-$$}" ]
+}
 
 write_epoch() {  # <outcome>
   local outcome=$1 seq tmp
@@ -170,6 +294,13 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
     "$SCRIPT_DIR/fm-watch-arm.sh" >"$OUT" 2>&1 || true
   else
     "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 || true
+  fi
+
+  # Ownership first: everything below this point writes shared auto-arm state,
+  # and a claim taken over while this arm was blocked belongs to its successor.
+  if ! still_owns_claim; then
+    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 0
   fi
 
   # AFK may have appeared mid-cycle: the daemon owns triage now, so suppress

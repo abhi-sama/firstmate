@@ -712,6 +712,101 @@ fm_lock_try_acquire() {
   return "$rc"
 }
 
+# Break a lock whose recorded owner is STILL ALIVE but has been proven wedged by
+# the caller's own domain evidence, so supervision can be taken over instead of
+# blocked forever. fm_lock_try_acquire already recovers a DEAD owner; this is the
+# separate live-but-stuck case, which no generic liveness test can detect.
+#
+# The caller passes the exact pid it observed holding the lock, and the break is
+# refused unless that pid still owns it, so a lock that changed hands between the
+# observation and the break is never removed. The wedged process is left running:
+# fm_lock_release only removes a lock that still points at the releaser's own owner
+# directory, so when that process finally exits it cannot take a successor's lock
+# with it.
+#
+# Exit codes separate the two refusals, because they mean opposite things to a
+# caller deciding whether supervision is actually blocked:
+#   0  the wedged owner's claim was removed
+#   2  nothing to break - the observed owner no longer holds this lock, or
+#      another breaker is already resolving it, so the caller lost an ordinary
+#      race
+#   1  a genuine break failure - that owner still holds the lock and it could
+#      not be removed, so the claim really is stuck
+#
+# Proving the wedge is the CALLER's job and must never be reduced to age alone.
+# bin/fm-claude-stop-autoarm.sh is the only caller; see its owner-wedge contract.
+fm_lock_break_wedged_owner() {  # <lockdir> <expected-owner-pid>
+  local lockdir=$1 expected=$2 steal rc
+  case "$expected" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  # Serialize under the SAME steal lock fm_lock_try_acquire's recovery path uses.
+  # Two callers can judge one owner wedged at the same instant; unserialized, the
+  # loser's removal lands after the winner has already re-claimed and deletes a
+  # brand-new successor lock, so both would go on to own the same single flight.
+  # Holding this lock also blocks every concurrent claim of the primary lock
+  # (fm_lock_claim_blocked_by_steal), so the break is atomic against them too.
+  # Losing it is an ordinary race: another breaker owns this exact question.
+  steal="$lockdir.steal"
+  fm_lock_try_acquire "$steal" || return 2
+  _fm_lock_break_verified_owner "$lockdir" "$expected"
+  rc=$?
+  fm_lock_release "$steal"
+  return "$rc"
+}
+
+# The break itself, run only while the caller holds "$lockdir.steal". EVERY read
+# of the lock happens here, after that serialization, so the owner this proves is
+# the same owner it removes.
+_fm_lock_break_verified_owner() {  # <lockdir> <expected-owner-pid>
+  local lockdir=$1 expected=$2 ownerdir actual aside
+  if [ -L "$lockdir" ]; then
+    ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
+    [ -n "$ownerdir" ] || return 2
+    actual=$(cat "$ownerdir/pid" 2>/dev/null || true)
+    [ "$actual" = "$expected" ] || return 2
+    fm_lock_points_to_owner "$lockdir" "$ownerdir" || return 2
+    rm -f "$lockdir" 2>/dev/null || return 1
+    fm_lock_discard_owner "$ownerdir"
+    return 0
+  fi
+  [ -d "$lockdir" ] || return 2
+  actual=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ "$actual" = "$expected" ] || return 2
+  # Prove the lock is removable BEFORE destroying the identity inside it, the
+  # same order the symlink branch above uses. Renaming the whole directory
+  # frees the lock name in one step, so a rename this process cannot perform
+  # leaves the owner's pid and role intact and the lock still reclaimable,
+  # rather than a pid-less directory no later acquire could ever recover. The
+  # renamed directory is this process's own scratch and is removed outright, so
+  # a break never leaves an unowned record behind for an operator to find.
+  aside="$lockdir.wedged.$$"
+  rm -rf "$aside" 2>/dev/null || true
+  mv "$lockdir" "$aside" 2>/dev/null || return 1
+  fm_lock_clean_known_files "$aside"
+  rm -rf "$aside" 2>/dev/null || true
+  return 0
+}
+
+# Seconds since the current owner claimed <lockdir>, measured on the owner
+# DIRECTORY the lock points at rather than on the lock path itself. Neither
+# platform's stat follows a symlink by default (GNU needs -L, exactly like
+# BSD), so reading the lock path would time the link rather than the claim it
+# publishes, while the owner directory is the record of the claim on both.
+# Returns 1 when no owner can be resolved, so a caller can never read an
+# unresolvable lock as an arbitrarily old one.
+fm_lock_owner_held_for() {  # <lockdir>
+  local lockdir=$1 ownerdir
+  if [ -L "$lockdir" ]; then
+    ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
+    [ -n "$ownerdir" ] && [ -d "$ownerdir" ] || return 1
+    fm_path_age "$ownerdir"
+    return 0
+  fi
+  [ -d "$lockdir" ] || return 1
+  fm_path_age "$lockdir"
+}
+
 fm_lock_acquire_wait() {
   local lockdir=$1
   while ! fm_lock_try_acquire "$lockdir"; do
