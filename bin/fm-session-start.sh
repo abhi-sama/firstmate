@@ -45,8 +45,9 @@
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#                       state/.afk, any recorded Stop auto-arm owner-claim
+#                       takeover or refusal, and a cheap per-task
+#                       endpoint-liveness read: read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -855,6 +856,21 @@ if [ -e "$STATE/.afk" ]; then
   printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'
 else
   printf 'absent\n'
+fi
+
+# The Stop auto-arm's single-flight claim: bin/fm-claude-stop-autoarm.sh records
+# a wedged-owner takeover, or a claim it could not break at all, and clears the
+# record only once a healthy watcher is confirmed. This is that record's one
+# reader, so a claim that blocked supervision is never a silent exit. Absent is
+# the ordinary case and prints nothing: ordinary races record nothing at all.
+AUTOARM_CONTENDED="$STATE/.claude-autoarm-contended"
+if [ -f "$AUTOARM_CONTENDED" ]; then
+  subsection "Watcher auto-arm claim"
+  printf '%s\n' "$(head -1 "$AUTOARM_CONTENDED" 2>/dev/null | cut -c1-400)"
+  printf 'outcome=broken - a previous turn-end arm was stuck holding the claim and this\n'
+  printf 'home took it over; outcome=stuck - the claim could not be taken over and\n'
+  printf 'automatic supervision may not be arming. The record clears itself once a\n'
+  printf 'healthy watcher is confirmed, so re-check supervision before acting on it.\n'
 fi
 
 # Public commitments made through the myfirstmate relay. A promise to reply in a

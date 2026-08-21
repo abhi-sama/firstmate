@@ -724,34 +724,53 @@ fm_lock_try_acquire() {
 # directory, so when that process finally exits it cannot take a successor's lock
 # with it.
 #
+# Exit codes separate the two refusals, because they mean opposite things to a
+# caller deciding whether supervision is actually blocked:
+#   0  the wedged owner's claim was removed
+#   2  nothing to break - the observed owner no longer holds this lock, so the
+#      claim already moved on and the caller lost an ordinary race
+#   1  a genuine break failure - that owner still holds the lock and it could
+#      not be removed, so the claim really is stuck
+#
 # Proving the wedge is the CALLER's job and must never be reduced to age alone.
 # bin/fm-claude-stop-autoarm.sh is the only caller; see its owner-wedge contract.
 fm_lock_break_wedged_owner() {  # <lockdir> <expected-owner-pid>
-  local lockdir=$1 expected=$2 ownerdir actual
+  local lockdir=$1 expected=$2 ownerdir actual aside
   case "$expected" in
     ''|*[!0-9]*) return 1 ;;
   esac
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
-    [ -n "$ownerdir" ] || return 1
+    [ -n "$ownerdir" ] || return 2
     actual=$(cat "$ownerdir/pid" 2>/dev/null || true)
-    [ "$actual" = "$expected" ] || return 1
-    fm_lock_points_to_owner "$lockdir" "$ownerdir" || return 1
+    [ "$actual" = "$expected" ] || return 2
+    fm_lock_points_to_owner "$lockdir" "$ownerdir" || return 2
     rm -f "$lockdir" 2>/dev/null || return 1
     fm_lock_discard_owner "$ownerdir"
     return 0
   fi
-  [ -d "$lockdir" ] || return 1
+  [ -d "$lockdir" ] || return 2
   actual=$(cat "$lockdir/pid" 2>/dev/null || true)
-  [ "$actual" = "$expected" ] || return 1
-  fm_lock_clean_known_files "$lockdir"
-  rmdir "$lockdir" 2>/dev/null
+  [ "$actual" = "$expected" ] || return 2
+  # Prove the lock is removable BEFORE destroying the identity inside it, the
+  # same order the symlink branch above uses. Renaming the whole directory
+  # frees the lock name in one step, so a rename this process cannot perform
+  # leaves the owner's pid and role intact and the lock still reclaimable,
+  # rather than a pid-less directory no later acquire could ever recover.
+  aside="$lockdir.wedged.$$"
+  rm -rf "$aside" 2>/dev/null || true
+  mv "$lockdir" "$aside" 2>/dev/null || return 1
+  fm_lock_clean_known_files "$aside"
+  rmdir "$aside" 2>/dev/null || true
+  return 0
 }
 
 # Seconds since the current owner claimed <lockdir>, measured on the owner
-# DIRECTORY rather than the lock symlink because the two platforms' stat
-# semantics differ on links: BSD stat reports the link itself, GNU stat follows
-# it. Returns 1 when no owner can be resolved, so a caller can never read an
+# DIRECTORY the lock points at rather than on the lock path itself. Neither
+# platform's stat follows a symlink by default (GNU needs -L, exactly like
+# BSD), so reading the lock path would time the link rather than the claim it
+# publishes, while the owner directory is the record of the claim on both.
+# Returns 1 when no owner can be resolved, so a caller can never read an
 # unresolvable lock as an arbitrarily old one.
 fm_lock_owner_held_for() {  # <lockdir>
   local lockdir=$1 ownerdir

@@ -27,8 +27,11 @@
 #     fm_lock_try_acquire; an owner that is still alive but wedged inside its own
 #     foreground arm is taken over here, under the narrow test below, because it
 #     would otherwise hold the claim forever and silence every later firing.
-#     A refusal this hook could not resolve, and a takeover it performed, are
-#     recorded in state/.claude-autoarm-contended so neither is invisible.
+#     A takeover it performed, and a claim it could not break at all, are
+#     recorded in state/.claude-autoarm-contended so neither is invisible; every
+#     ordinary race stays silent, and the record is cleared only once a healthy
+#     watcher is confirmed, never by the next successful claim. The session-start
+#     digest (bin/fm-session-start.sh) is that record's one reader.
 #   - Foreground arm: the owner runs bin/fm-watch-arm.sh in the FOREGROUND of
 #     this hook-owned process tree (never shell &); Claude owns the process
 #     group, so its timeout/session teardown kills arm and watcher together.
@@ -176,20 +179,36 @@ owner_is_wedged() {  # <holder-pid> <held-seconds>
 # True when this firing owns the single-flight lock. A refusal that resolves
 # itself - a concurrent firing losing an ordinary race, or an owner this hook
 # cannot prove wedged - stays silent, exactly as before.
+#
+# An ordinary acquire does NOT clear a recorded takeover or unresolved claim:
+# this hook fires on every Stop, so clearing on any successful claim would erase
+# the record seconds after it was written and leave the failure invisible again.
+# The record survives until a healthy watcher is actually confirmed, which is
+# the only evidence that supervision came back.
 claim_owner_lock() {
-  local held_pid held_for
+  local held_pid held_for broke
   if fm_lock_try_acquire "$OWNER_LOCK"; then
-    rm -f "$CONTENDED" 2>/dev/null || true
+    if fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
+      rm -f "$CONTENDED" 2>/dev/null || true
+    fi
     return 0
   fi
   held_pid=${FM_LOCK_HELD_PID:-}
   held_for=$(fm_lock_owner_held_for "$OWNER_LOCK") || return 1
   owner_is_wedged "$held_pid" "$held_for" || return 1
-  if ! fm_lock_break_wedged_owner "$OWNER_LOCK" "$held_pid" \
-    || ! fm_lock_try_acquire "$OWNER_LOCK"; then
-    record_contention "$held_pid" "$held_for" stuck
-    return 1
-  fi
+  # Only a GENUINE break failure - that owner still holds the lock and it could
+  # not be removed - is an unresolved claim worth recording. Both ways a peer
+  # firing can beat this one to the same wedged owner are ordinary races that
+  # armed supervision anyway, and stay silent like every other lost race: the
+  # break finding the claim already moved on (exit 2), and losing the re-acquire
+  # after a successful break.
+  fm_lock_break_wedged_owner "$OWNER_LOCK" "$held_pid" && broke=0 || broke=$?
+  case "$broke" in
+    0) : ;;
+    2) return 1 ;;
+    *) record_contention "$held_pid" "$held_for" stuck; return 1 ;;
+  esac
+  fm_lock_try_acquire "$OWNER_LOCK" || return 1
   record_contention "$held_pid" "$held_for" broken
   return 0
 }
