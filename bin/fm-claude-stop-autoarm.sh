@@ -29,9 +29,12 @@
 #     would otherwise hold the claim forever and silence every later firing.
 #     A takeover it performed, and a claim it could not break at all, are
 #     recorded in state/.claude-autoarm-contended so neither is invisible; every
-#     ordinary race stays silent, and the record is cleared only once a healthy
-#     watcher is confirmed, never by the next successful claim. The session-start
-#     digest (bin/fm-session-start.sh) is that record's one reader.
+#     ordinary race stays silent, and the record is cleared only once a watcher
+#     beat inside the grace window shows supervision came back, never by the next
+#     successful claim. The session-start digest (bin/fm-session-start.sh) is
+#     that record's one reader, and reads it without clearing it. A taken-over
+#     owner that later resumes is dispossessed: it writes no epoch, resets no
+#     failure state, and emits no rewake, so one cycle keeps one writer.
 #   - Foreground arm: the owner runs bin/fm-watch-arm.sh in the FOREGROUND of
 #     this hook-owned process tree (never shell &); Claude owns the process
 #     group, so its timeout/session teardown kills arm and watcher together.
@@ -163,6 +166,21 @@ record_contention() {  # <holder-pid> <held-seconds> <outcome>
   rm -f "$tmp" 2>/dev/null || true
 }
 
+# Evidence that supervision actually came back. This hook's model arms the
+# watcher at turn end and that watcher exits on its wake, so at the next Stop
+# there is normally no watcher PROCESS left to find - only the beat it left
+# behind. A beacon beaten inside the grace window is therefore the model-correct
+# signal here, while the pid-strict predicate below stays pid-strict, because a
+# leftover beacon must never excuse a claim with nothing running behind it.
+supervision_recently_beat() {
+  local age
+  age=$(fm_path_age "$STATE/.last-watcher-beat")
+  case "$age" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$age" -lt "$GRACE" ]
+}
+
 owner_is_wedged() {  # <holder-pid> <held-seconds>
   local pid=$1 held=$2
   case "$pid" in
@@ -183,12 +201,13 @@ owner_is_wedged() {  # <holder-pid> <held-seconds>
 # An ordinary acquire does NOT clear a recorded takeover or unresolved claim:
 # this hook fires on every Stop, so clearing on any successful claim would erase
 # the record seconds after it was written and leave the failure invisible again.
-# The record survives until a healthy watcher is actually confirmed, which is
-# the only evidence that supervision came back.
+# The record survives until a watcher beat inside the grace window shows that
+# supervision came back, and while an owner is wedged with nothing supervising
+# that beacon goes stale and the record is kept.
 claim_owner_lock() {
   local held_pid held_for broke
   if fm_lock_try_acquire "$OWNER_LOCK"; then
-    if fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
+    if supervision_recently_beat; then
       rm -f "$CONTENDED" 2>/dev/null || true
     fi
     return 0
@@ -214,11 +233,27 @@ claim_owner_lock() {
 }
 
 claim_owner_lock || exit 0
+CLAIM_OWNER_DIR=${FM_LOCK_OWNER_DIR:-}
 if ! fm_lock_set_role "$OWNER_LOCK" autoarm; then
   fm_lock_release "$OWNER_LOCK"
   exit 0
 fi
 trap 'fm_lock_release "$OWNER_LOCK"' EXIT
+
+# The takeover above removes a wedged owner's claim but deliberately leaves that
+# process running, so this hook must never assume it still holds what it claimed.
+# A dispossessed owner that finally resumes - a blocked arm waking after the
+# machine slept - would otherwise bump the epoch its successor now owns, clear
+# the successor's failure markers, and emit a second rewake banner for a single
+# watcher cycle. The epoch ledger has one writer only while this holds.
+still_owns_claim() {
+  local pid
+  if [ -n "$CLAIM_OWNER_DIR" ] && [ -L "$OWNER_LOCK" ]; then
+    fm_lock_points_to_owner "$OWNER_LOCK" "$CLAIM_OWNER_DIR" || return 1
+  fi
+  pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
+  [ "$pid" = "${BASHPID:-$$}" ]
+}
 
 write_epoch() {  # <outcome>
   local outcome=$1 seq tmp
@@ -259,6 +294,13 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
     "$SCRIPT_DIR/fm-watch-arm.sh" >"$OUT" 2>&1 || true
   else
     "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 || true
+  fi
+
+  # Ownership first: everything below this point writes shared auto-arm state,
+  # and a claim taken over while this arm was blocked belongs to its successor.
+  if ! still_owns_claim; then
+    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 0
   fi
 
   # AFK may have appeared mid-cycle: the daemon owns triage now, so suppress

@@ -727,18 +727,39 @@ fm_lock_try_acquire() {
 # Exit codes separate the two refusals, because they mean opposite things to a
 # caller deciding whether supervision is actually blocked:
 #   0  the wedged owner's claim was removed
-#   2  nothing to break - the observed owner no longer holds this lock, so the
-#      claim already moved on and the caller lost an ordinary race
+#   2  nothing to break - the observed owner no longer holds this lock, or
+#      another breaker is already resolving it, so the caller lost an ordinary
+#      race
 #   1  a genuine break failure - that owner still holds the lock and it could
 #      not be removed, so the claim really is stuck
 #
 # Proving the wedge is the CALLER's job and must never be reduced to age alone.
 # bin/fm-claude-stop-autoarm.sh is the only caller; see its owner-wedge contract.
 fm_lock_break_wedged_owner() {  # <lockdir> <expected-owner-pid>
-  local lockdir=$1 expected=$2 ownerdir actual aside
+  local lockdir=$1 expected=$2 steal rc
   case "$expected" in
     ''|*[!0-9]*) return 1 ;;
   esac
+  # Serialize under the SAME steal lock fm_lock_try_acquire's recovery path uses.
+  # Two callers can judge one owner wedged at the same instant; unserialized, the
+  # loser's removal lands after the winner has already re-claimed and deletes a
+  # brand-new successor lock, so both would go on to own the same single flight.
+  # Holding this lock also blocks every concurrent claim of the primary lock
+  # (fm_lock_claim_blocked_by_steal), so the break is atomic against them too.
+  # Losing it is an ordinary race: another breaker owns this exact question.
+  steal="$lockdir.steal"
+  fm_lock_try_acquire "$steal" || return 2
+  _fm_lock_break_verified_owner "$lockdir" "$expected"
+  rc=$?
+  fm_lock_release "$steal"
+  return "$rc"
+}
+
+# The break itself, run only while the caller holds "$lockdir.steal". EVERY read
+# of the lock happens here, after that serialization, so the owner this proves is
+# the same owner it removes.
+_fm_lock_break_verified_owner() {  # <lockdir> <expected-owner-pid>
+  local lockdir=$1 expected=$2 ownerdir actual aside
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     [ -n "$ownerdir" ] || return 2
@@ -756,12 +777,14 @@ fm_lock_break_wedged_owner() {  # <lockdir> <expected-owner-pid>
   # same order the symlink branch above uses. Renaming the whole directory
   # frees the lock name in one step, so a rename this process cannot perform
   # leaves the owner's pid and role intact and the lock still reclaimable,
-  # rather than a pid-less directory no later acquire could ever recover.
+  # rather than a pid-less directory no later acquire could ever recover. The
+  # renamed directory is this process's own scratch and is removed outright, so
+  # a break never leaves an unowned record behind for an operator to find.
   aside="$lockdir.wedged.$$"
   rm -rf "$aside" 2>/dev/null || true
   mv "$lockdir" "$aside" 2>/dev/null || return 1
   fm_lock_clean_known_files "$aside"
-  rmdir "$aside" 2>/dev/null || true
+  rm -rf "$aside" 2>/dev/null || true
   return 0
 }
 

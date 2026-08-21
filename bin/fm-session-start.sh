@@ -860,17 +860,18 @@ fi
 
 # The Stop auto-arm's single-flight claim: bin/fm-claude-stop-autoarm.sh records
 # a wedged-owner takeover, or a claim it could not break at all, and clears the
-# record only once a healthy watcher is confirmed. This is that record's one
-# reader, so a claim that blocked supervision is never a silent exit. Absent is
-# the ordinary case and prints nothing: ordinary races record nothing at all.
+# record only once the watcher beacon is fresh again. This is that record's one
+# reader and is strictly read-only, so a claim that blocked supervision is never
+# a silent exit and is never cleared by being read. Absent is the ordinary case
+# and prints nothing: ordinary races record nothing at all.
 AUTOARM_CONTENDED="$STATE/.claude-autoarm-contended"
 if [ -f "$AUTOARM_CONTENDED" ]; then
   subsection "Watcher auto-arm claim"
   printf '%s\n' "$(head -1 "$AUTOARM_CONTENDED" 2>/dev/null | cut -c1-400)"
   printf 'outcome=broken - a previous turn-end arm was stuck holding the claim and this\n'
   printf 'home took it over; outcome=stuck - the claim could not be taken over and\n'
-  printf 'automatic supervision may not be arming. The record clears itself once a\n'
-  printf 'healthy watcher is confirmed, so re-check supervision before acting on it.\n'
+  printf 'automatic supervision may not be arming. The record clears itself once the\n'
+  printf 'watcher beacon is fresh again, so re-check supervision before acting on it.\n'
 fi
 
 # Public commitments made through the myfirstmate relay. A promise to reply in a
