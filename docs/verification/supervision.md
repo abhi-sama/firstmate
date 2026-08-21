@@ -300,6 +300,21 @@ fm-doc-audience-check: ok surfaces=64 local_links=188
 FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=80078
 ```
 
+The wedged single-flight claim correction was verified on 2026-08-20 with isolated behavior suites.
+`bin/fm-claude-stop-autoarm.sh` now takes over a live but wedged owner instead of exiting silently forever, records that takeover or an unbreakable claim in `state/.claude-autoarm-contended`, dispossesses the taken-over owner so one cycle keeps one writer, and `bin/fm-session-start.sh` surfaces the record read-only.
+
+```sh
+bin/fm-doc-audience-check.sh
+bin/fm-test-run.sh tests/fm-claude-stop-autoarm.test.sh tests/fm-session-start.test.sh tests/fm-turnend-guard.test.sh tests/fm-guard-stale-banner.test.sh tests/fm-wake-queue.test.sh tests/fm-watcher-lock.test.sh
+```
+
+Observed output:
+
+```text
+fm-doc-audience-check: ok surfaces=68 local_links=244
+FM_TEST_SUMMARY total=6 failed=0 skipped_gate=0 duration_ms=383182
+```
+
 The broader relevant regression pass was rerun on 2026-08-02 without live-home or daemon mutation.
 
 ```sh
