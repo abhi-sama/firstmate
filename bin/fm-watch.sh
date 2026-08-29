@@ -775,8 +775,9 @@ watcher_cleanup() {
 trap watcher_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
-# ${BASHPID:-$$} from this same main shell). Read directly, never via a command
-# substitution, so it matches the stored holder pid for the self-eviction check.
+# this same main shell's fm_self_pid_resolve answer). Read directly, never via a
+# command substitution, which would report the fork's pid rather than this
+# shell's and break the self-eviction check against the stored holder pid.
 WATCHER_PID=${BASHPID:-$$}
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
