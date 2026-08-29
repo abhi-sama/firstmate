@@ -710,6 +710,55 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# 2026-08-28 near-miss: a crewmate doing cosmetic UI polish ended up signed into
+# the captain's real account on the live hosted board, took over a load-bearing
+# port an always-on service depended on, and copied a hosted secrets file into a
+# pooled worktree. Root cause: the generated brief never drew this boundary, so
+# it must be a fixed part of the Rules a worker always carries, not per-task text
+# firstmate can forget to add. Ship and scout both do hands-on system/browser
+# work and must carry it; a secondmate charter delegates that work to its own
+# crewmates, who get it through their own briefs, so the charter itself must not.
+test_production_safety_rule_present() {
+  local home id brief
+  home="$TMP_ROOT/production-safety-home"
+  mkdir -p "$home/data"
+
+  id="brief-prodsafe-ship"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "Production safety" "$brief" "ship brief missing the Production safety rule"
+  assert_grep "Never sign into a production, shared, or the operator's own account or session" "$brief" \
+    "ship brief missing the no-production-account boundary"
+  assert_grep "Never take over, stop, restart, or displace another shared or always-on service" "$brief" \
+    "ship brief missing the shared-service takeover boundary"
+  assert_grep "Never copy credentials or env files holding secrets into this worktree" "$brief" \
+    "ship brief missing the credentials-into-worktree boundary"
+  # shellcheck disable=SC2016  # backticks are deliberate literal brief text
+  assert_grep 'Never attempt an auth bypass or token manipulation; if auth blocks you, append `blocked: {why}` and stop.' "$brief" \
+    "ship brief missing the auth-bypass boundary"
+  # shellcheck disable=SC2016  # backticks are deliberate literal brief text
+  assert_grep 'needs `needs-decision: {why}` BEFORE you do it, not a status line after' "$brief" \
+    "ship brief missing the before-the-fact needs-decision requirement"
+  assert_grep "prefer it over ad-hoc browser driving" "$brief" \
+    "ship brief missing the fixture-over-ad-hoc-browser-driving guidance"
+
+  id="brief-prodsafe-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "Production safety" "$brief" "scout brief missing the Production safety rule"
+  assert_grep "Never take over, stop, restart, or displace another shared or always-on service" "$brief" \
+    "scout brief missing the shared-service takeover boundary"
+
+  id="brief-prodsafe-secondmate"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='x' \
+    "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_no_grep "Production safety" "$brief" \
+    "secondmate charter unexpectedly carries the ship/scout-specific Production safety rule"
+
+  pass "fm-brief.sh: ship and scout briefs carry the Production safety rule; secondmate charters do not"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -995,4 +1044,5 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_production_safety_rule_present
 test_scout_and_secondmate_scaffold
