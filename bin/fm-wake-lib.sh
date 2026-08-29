@@ -202,7 +202,45 @@ fm_lock_clean_known_files() {
     2>/dev/null || true
 }
 
-# Process-local record of the locks THIS shell currently holds.
+# This shell's OWN pid, as opposed to $$, which every forked subshell inherits
+# from its parent. Sets FM_SELF_PID, and RETURNS non-zero when that answer is
+# only a fallback rather than this shell's proven real pid.
+#
+# A SETTER, never a printing function, because the answer cannot survive being
+# returned: $(fm_self_pid) would run in a command substitution, which is itself
+# one of the forks this exists to tell apart, and would report that fork's pid.
+#
+# bash 4+ answers directly from BASHPID. Stock macOS /bin/bash is 3.2.57, which
+# has no BASHPID and reports the PARENT's pid in $$ inside every subshell,
+# command substitution, background job, pipeline stage and process substitution.
+# There the answer comes from the one place that can still tell them apart: a
+# child process's own view of who its parent is. The child is forked directly by
+# this shell, so its $PPID is this shell's real pid. /dev/fd is required for the
+# process substitution below and is present wherever a BASHPID-less bash is -
+# Git Bash/MSYS, the other platform this stack supports, ships bash 4+.
+#
+# On a shell where neither source works, FM_SELF_PID falls back to $$ so lock
+# records keep the pid they have always carried, and the non-zero return makes
+# fm_lock_held_by_self refuse to claim an ownership it cannot prove.
+FM_SELF_PID=
+
+fm_self_pid_resolve() {
+  if [ -n "${BASHPID:-}" ]; then
+    FM_SELF_PID=$BASHPID
+    return 0
+  fi
+  FM_SELF_PID=
+  read -r FM_SELF_PID < <(exec sh -c 'echo $PPID') 2>/dev/null || true
+  case "$FM_SELF_PID" in
+    ''|*[!0-9]*)
+      FM_SELF_PID=$$
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+# Process-local record of which owner directory THIS shell created for a lock.
 #
 # A signal landing inside a lock's critical section runs the EXIT trap, and that
 # cleanup path re-enters the same lock to finish the transition it interrupted.
@@ -211,46 +249,52 @@ fm_lock_clean_known_files() {
 # construction because it is the caller itself. Without this record the exit
 # trap spins in fm_lock_acquire_wait forever, waiting on a claim it orphaned.
 #
-# A recorded pid alone cannot prove self-ownership, because a dead process that
-# held this pid before us leaves a claim that reads identically. Self-ownership
-# therefore requires BOTH this in-memory record and a matching recorded pid, so
-# a recycled pid still falls through to ordinary stale-lock recovery, and a
-# subshell - which inherits the record but has its own BASHPID - still blocks.
+# The record is a HINT, never the answer: fm_lock_held_by_self re-derives the
+# answer from the lock on disk every time, and the hint only supplies the one
+# fact disk cannot - that the owner directory now published was created by this
+# process rather than by a dead process whose pid we were later given. That is
+# what makes the record ordering-free. A record kept after the lock is gone, or
+# written for a claim that then loses its race, simply verifies false, so
+# nothing has to drop it inside a window a signal could land in.
 #
-# Initialized preserving any existing value: bin/fm-teardown.sh and
-# bin/fm-pending-reply-lib.sh source this library more than once, and a plain
-# reset would silently discard a claim already recorded by an earlier source.
-FM_LOCK_SELF_HELD=${FM_LOCK_SELF_HELD-}
-
-fm_lock_self_holds() {  # <lockdir>
-  case "$FM_LOCK_SELF_HELD" in
-    *"|$1|"*) return 0 ;;
-  esac
-  return 1
+# One shell variable per lock, keyed by the lock's path with every character
+# outside [A-Za-z0-9] folded to _. Two distinct locks can fold to one key; that
+# only ever yields the wrong owner directory, which then fails verification, so
+# a collision costs a re-entry, never a false claim of ownership.
+_fm_lock_self_slot() {  # <lockdir>; sets _FM_LOCK_SELF_SLOT
+  _FM_LOCK_SELF_SLOT="FM_LOCK_SELF_OWNER_${1//[!A-Za-z0-9]/_}"
 }
 
-fm_lock_self_note_held() {  # <lockdir>
-  fm_lock_self_holds "$1" || FM_LOCK_SELF_HELD="${FM_LOCK_SELF_HELD}|$1|"
+fm_lock_self_note_held() {  # <lockdir> <ownerdir>
+  _fm_lock_self_slot "$1"
+  printf -v "$_FM_LOCK_SELF_SLOT" '%s' "$2"
 }
 
-fm_lock_self_forget_held() {  # <lockdir>
-  FM_LOCK_SELF_HELD=${FM_LOCK_SELF_HELD//"|$1|"/}
+fm_lock_self_owner_dir() {  # <lockdir>; sets FM_LOCK_SELF_OWNER
+  _fm_lock_self_slot "$1"
+  FM_LOCK_SELF_OWNER=${!_FM_LOCK_SELF_SLOT:-}
+  [ -n "$FM_LOCK_SELF_OWNER" ]
 }
 
-# True when <lockdir>'s current claim is this very process's own, per the two
-# independent proofs above.
+# True when <lockdir>'s current claim is this very process's own.
+#
+# Three proofs, all re-read at call time: this process created owner directory
+# X, the lock published right now still points at X, and X records this shell's
+# own pid. The middle proof rejects a claim we have already released or lost;
+# the last rejects a fork of ours, which inherits the hint but not the pid. An
+# identity fm_self_pid_resolve could not prove is never treated as a match, so
+# such a shell degrades to the old wait rather than to a broken mutual exclusion.
 fm_lock_held_by_self() {  # <lockdir>
-  local lockdir=$1 ownerdir pid
-  fm_lock_self_holds "$lockdir" || return 1
-  if [ -L "$lockdir" ]; then
-    ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
-    [ -n "$ownerdir" ] || return 1
-    pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
-  else
-    [ -d "$lockdir" ] || return 1
-    pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  fi
-  [ "$pid" = "${BASHPID:-$$}" ]
+  local lockdir=$1 pid
+  fm_lock_self_owner_dir "$lockdir" || return 1
+  # Every claim this process can create is published as a symlink to the owner
+  # directory it made, so a plain-directory lock is never one of ours. Checked
+  # before fm_self_pid_resolve because that call may cost a fork.
+  [ -L "$lockdir" ] || return 1
+  fm_lock_points_to_owner "$lockdir" "$FM_LOCK_SELF_OWNER" || return 1
+  fm_self_pid_resolve || return 1
+  pid=$(cat "$FM_LOCK_SELF_OWNER/pid" 2>/dev/null || true)
+  [ "$pid" = "$FM_SELF_PID" ]
 }
 
 fm_lock_set_role() {
@@ -259,7 +303,8 @@ fm_lock_set_role() {
     autoarm|terminal-check) : ;;
     *) return 1 ;;
   esac
-  current=${BASHPID:-$$}
+  fm_self_pid_resolve || true
+  current=$FM_SELF_PID
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$pid" = "$current" ] || return 1
   printf '%s\n' "$role" > "$lockdir/role" 2>/dev/null || return 1
@@ -287,7 +332,8 @@ fm_lock_owner_dir() {
 
 fm_lock_prepare_owner() {
   local ownerdir=$1 mypid back
-  mypid=${BASHPID:-$$}
+  fm_self_pid_resolve || true
+  mypid=$FM_SELF_PID
   printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
   [ "$back" = "$mypid" ]
@@ -336,7 +382,8 @@ fm_lock_claim_blocked_by_steal() {
 
 fm_lock_claim() {
   local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-} mypid back
-  mypid=${BASHPID:-$$}
+  fm_self_pid_resolve || true
+  mypid=$FM_SELF_PID
   if ! { printf '%s\n' "$mypid" > "$ownerdir/pid"; } 2>/dev/null; then
     fm_lock_discard_owner "$ownerdir"
     return 1
@@ -357,7 +404,6 @@ fm_lock_claim() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  fm_lock_self_note_held "$lockdir"
   return 0
 }
 
@@ -373,6 +419,11 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
+  # Recorded BEFORE the claim is published, so no signal can land in a state
+  # where this process holds a lock it cannot recognise. The owner directory
+  # already carries our pid at this point, and a record for a claim that then
+  # loses the ln -s race verifies false rather than misleading anyone.
+  fm_lock_self_note_held "$lockdir" "$ownerdir"
   if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
       FM_LOCK_OWNER_DIR=$ownerdir
@@ -390,7 +441,6 @@ fm_lock_try_create() {
 
 fm_lock_remove_path() {
   local lockdir=$1 ownerdir
-  fm_lock_self_forget_held "$lockdir"
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     rm -f "$lockdir" 2>/dev/null || return 1
@@ -827,7 +877,6 @@ fm_lock_break_wedged_owner() {  # <lockdir> <expected-owner-pid>
 # the same owner it removes.
 _fm_lock_break_verified_owner() {  # <lockdir> <expected-owner-pid>
   local lockdir=$1 expected=$2 ownerdir actual aside
-  [ "$expected" != "${BASHPID:-$$}" ] || fm_lock_self_forget_held "$lockdir"
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     [ -n "$ownerdir" ] || return 2
@@ -905,10 +954,15 @@ fm_lock_acquire_wait() {
 
 fm_lock_release() {
   local lockdir=$1 pid current ownerdir
-  current=${BASHPID:-$$}
-  # Forget unconditionally: either this call gives the claim up, or the recorded
-  # owner is not us and we did not hold it in the first place.
-  fm_lock_self_forget_held "$lockdir"
+  fm_self_pid_resolve || true
+  current=$FM_SELF_PID
+  # Nothing is dropped from the process-local record here. Doing so would open
+  # the very window this release is walking through: between forgetting and the
+  # rm below there are three forks, and a signal landing in them would leave
+  # this process holding its own claim with no way to recognise it, deadlocking
+  # the exit trap exactly as an interrupted critical section used to. The record
+  # needs no clearing because fm_lock_held_by_self re-reads the lock every time
+  # and a record for a lock that is gone verifies false.
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     [ -n "$ownerdir" ] || return 0
@@ -970,7 +1024,8 @@ fm_failure_episode_reset() {
       acquired=1
       ;;
     held)
-      current=${BASHPID:-$$}
+      fm_self_pid_resolve || true
+      current=$FM_SELF_PID
       pid=$(cat "$lock/pid" 2>/dev/null || true)
       [ "$pid" = "$current" ] || return 1
       ;;

@@ -445,6 +445,135 @@ test_lock_recycled_pid_claim_is_not_self_owned() {
   pass "self-ownership needs this process's own claim, not a matching pid"
 }
 
+# Stock macOS /bin/bash is 3.2.57, which has no BASHPID, and $$ inside a forked
+# subshell is the PARENT's pid. Self-ownership must therefore never rest on $$:
+# every fork shape below would otherwise re-enter - and then destroy - a claim
+# its parent still holds. Runs under real bash 3.x when the host has one, and
+# always under this shell with BASHPID unset, which reproduces the same
+# semantics on bash 4+ because unsetting a special variable is permanent.
+write_fork_shape_probe() {  # <path>
+  cat > "$1" <<'PROBE'
+unset BASHPID 2>/dev/null || true
+. "$1"
+lockdir=$2
+[ -z "${BASHPID:-}" ] || { printf 'bashpid=still-set\n'; exit 0; }
+fm_lock_try_acquire "$lockdir" || { printf 'parent=no-acquire\n'; exit 0; }
+probe() {
+  if fm_lock_try_acquire "$lockdir"; then
+    printf '%s=REENTERED ' "$1"
+  else
+    printf '%s=blocked ' "$1"
+  fi
+}
+( probe subshell )
+captured=$(probe cmdsub); printf '%s' "$captured"
+probe background &
+wait
+probe pipeline | cat
+read -r line < <(probe procsub) || true; printf '%s' "$line"
+probe sameshell
+printf '\n'
+PROBE
+}
+
+test_lock_self_ownership_is_fork_safe_without_bashpid() {
+  local dir state probe shell out label shape shells
+  dir=$(make_case lock-fork-identity)
+  state="$dir/state"
+  probe="$dir/forkshapes.sh"
+  write_fork_shape_probe "$probe"
+
+  shells=bash
+  if [ -x /bin/bash ] && /bin/bash -c '[ "${BASH_VERSINFO[0]}" -lt 4 ]' 2>/dev/null; then
+    shells="bash /bin/bash"
+  fi
+
+  for shell in $shells; do
+    # shellcheck disable=SC2016  # $BASH_VERSION must expand in the target shell
+    label=$("$shell" -c 'printf "%s" "$BASH_VERSION"')
+    out=$(FM_STATE_OVERRIDE="$state" "$shell" "$probe" "$LIB" "$state/.fork-identity.lock") \
+      || fail "fork-shape probe failed to run under bash $label: $out"
+    rm -rf "$state/.fork-identity.lock" "$state/.fork-identity.lock.owner."*
+    case "$out" in
+      *bashpid=still-set*) fail "probe could not drop BASHPID under bash $label" ;;
+      *parent=no-acquire*) fail "probe could not take the parent claim under bash $label" ;;
+    esac
+    for shape in subshell cmdsub background pipeline procsub; do
+      case "$out" in
+        *"$shape=blocked"*) ;;
+        *) fail "a forked $shape re-entered a claim its parent holds under bash $label: $out" ;;
+      esac
+    done
+    case "$out" in
+      *sameshell=REENTERED*) ;;
+      *) fail "the claiming shell itself could not re-enter under bash $label: $out" ;;
+    esac
+  done
+  pass "self-ownership survives a fork on a shell with no BASHPID"
+}
+
+# fm_lock_release forks three times between deciding to release and actually
+# removing the lock. A signal delivered inside that window must still leave
+# self-ownership decidable, or the exit trap re-enters a claim it can no longer
+# recognise as its own and waits on itself forever - the same unbounded hang as
+# an interrupted critical section. The window is widened deterministically here
+# through the release path's own first fork.
+test_lock_signal_inside_release_window_is_reclaimed() {
+  local dir state lockdir victim i
+  dir=$(make_case lock-release-window)
+  state="$dir/state"
+  lockdir="$state/.releasewindow.lock"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lockdir=$2
+    done_marker=$3
+    releasing_marker=$4
+    eval "$(declare -f fm_lock_link_owner | sed "1s/^fm_lock_link_owner/_orig_link_owner/")"
+    fm_lock_link_owner() { sleep 2; _orig_link_owner "$@"; }
+    cleanup() {
+      fm_lock_acquire_wait "$lockdir"
+      fm_lock_release "$lockdir"
+      printf "reclaimed\n" > "$done_marker"
+    }
+    trap cleanup EXIT
+    trap "exit 1" TERM
+    fm_lock_acquire_wait "$lockdir"
+    printf "releasing\n" > "$releasing_marker"
+    fm_lock_release "$lockdir"
+    while :; do sleep 0.1; done
+  ' _ "$LIB" "$lockdir" "$dir/done" "$dir/releasing" &
+  victim=$!
+
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ -s "$dir/releasing" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$dir/releasing" ] || { kill -KILL "$victim" 2>/dev/null || true; fail "victim never entered its release path"; }
+  sleep 0.5
+
+  kill -TERM "$victim" 2>/dev/null || fail "could not signal the victim inside its release window"
+  i=0
+  while [ "$i" -lt 150 ]; do
+    kill -0 "$victim" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$victim" 2>/dev/null; then
+    kill -KILL "$victim" 2>/dev/null || true
+    wait "$victim" 2>/dev/null || true
+    fail "exit trap deadlocked on a claim interrupted inside fm_lock_release"
+  fi
+  wait "$victim" 2>/dev/null || true
+  [ "$(cat "$dir/done" 2>/dev/null || true)" = reclaimed ] \
+    || fail "exit trap did not complete the interrupted release"
+  [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] \
+    || fail "the interrupted release left the lock behind"
+  pass "a signal inside the release window is reclaimed by its own exit trap"
+}
+
 test_lock_empty_pid_uses_minimum_grace() {
   local dir state lockdir out
   dir=$(make_case lock-empty-grace)
@@ -1219,6 +1348,8 @@ test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
 test_lock_signal_orphaned_self_claim_is_reclaimed
 test_lock_recycled_pid_claim_is_not_self_owned
+test_lock_self_ownership_is_fork_safe_without_bashpid
+test_lock_signal_inside_release_window_is_reclaimed
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
