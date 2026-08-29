@@ -61,7 +61,9 @@ In the default Codex mode, a true value lets the second stop finish after one fo
 
 Claude runs the guard with `--claude`, which ignores `stop_hook_active` and cooperates with the Stop-owned auto-arm.
 Claude Code sets `stop_hook_active=true` on every stop after any stop-hook continuation, including `asyncRewake` rewakes, which re-opened the 2026-07-21 blind window under the default one-shot behavior.
-The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 milliseconds) and allows the stop when the watcher is healthy, `state/.claude-autoarm.lock` has a live `autoarm` role owner whose eventual failure must exit 2, or `state/.claude-autoarm-epoch` contains a fresh actionable rewake owned by this event epoch.
+The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 milliseconds) and allows the stop when the watcher is healthy, `state/.claude-autoarm.lock` has a live `autoarm` role owner whose claim is still fresh and whose eventual failure must exit 2, or `state/.claude-autoarm-epoch` contains a fresh actionable rewake owned by this event epoch.
+A claim counts as fresh for as long as one legitimate foreground arm can hold it, which is the arm's own watcher-confirm timeout (10 seconds, 30 on Git Bash/MSYS, or `FM_ARM_CONFIRM_TIMEOUT`) plus the `FM_CLAUDE_AUTOARM_EPOCH_FRESH` evidence margin.
+An older claim is no longer read as recovery under way, so a stale holder inside the auto-arm's own `FM_CLAUDE_AUTOARM_WEDGE_AFTER` takeover window can no longer suppress the blind-turn warning.
 Fresh `failed` and `failed-suppressed` outcomes enter or advance the failure progression instead of acting as unconditional recovery proof.
 The auto-arm itself rechecks the healthy watcher predicate and retries a bounded number of times before reporting a genuine failure.
 The first fresh exhausted-failure epoch preserves its handoff without consuming a blocked-stop count, while later fresh failed epochs advance the same monotonic progression instead of resetting it.

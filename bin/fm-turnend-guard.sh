@@ -48,7 +48,9 @@
 #   1. a live identity-matched watcher with a fresh beacon allows immediately;
 #   2. otherwise wait briefly (FM_CLAUDE_AUTOARM_SYNC_WAIT_MS, default 800ms)
 #      for the auto-arm to claim this home (state/.claude-autoarm.lock owner
-#      alive) or to record a fresh actionable exit-2 outcome
+#      alive, with a claim no older than one foreground arm plus the epoch
+#      freshness margin - see autoarm_claim_is_fresh) or to record a fresh
+#      actionable exit-2 outcome
 #      (state/.claude-autoarm-epoch) for this event epoch - either proof allows
 #      without consuming a continuation, so one event epoch yields exactly one recovery turn;
 #      the first fresh exhausted-failure epoch preserves the bounded progression,
@@ -237,12 +239,46 @@ budget_account_current_epoch() {
   return 0
 }
 
+# A live autoarm claim proves recovery is under way only while it is FRESH.
+#
+# Control reaches the claim test below only after fm_watcher_healthy has already
+# returned false, so supervision is known to be down at this instant. Trusting a
+# holder here is a bet that it is actively arming, and arming is a seconds-long
+# operation - the guard itself waits only SYNC_WAIT_MS (800ms) for the claim to
+# appear. An unbounded bet instead lets one stale claim allow every stop AND
+# suppress the blind-turn warning until the auto-arm's own takeover window
+# (FM_CLAUDE_AUTOARM_WEDGE_AFTER, default 900s) finally expires.
+#
+# The bound is sized from what a legitimate claim actually costs, not guessed:
+# the auto-arm runs bin/fm-watch-arm.sh in the FOREGROUND while holding this
+# lock, so a healthy claim can last as long as that arm waits to confirm its
+# watcher - fm_arm_confirm_timeout, 10s normally and 30s on Git Bash/MSYS, and
+# whatever an operator sets FM_ARM_CONFIRM_TIMEOUT to. EPOCH_FRESH is added on
+# top as the same evidence-freshness margin this guard already applies to the
+# auto-arm outcome record. Deriving both terms from existing owners means a
+# raised arm timeout moves this bound with it and no new knob is introduced.
+#
+# The auto-arm's 900s threshold is deliberately NOT reused. It is a takeover
+# threshold, kept long because a healthy cycle holds that lock for hours
+# (bin/fm-claude-stop-autoarm.sh's owner-wedge contract) - a case this branch has
+# already excluded. An unresolvable claim age is untrustworthy rather than fresh,
+# so it falls through to the warning instead of suppressing it.
+autoarm_claim_is_fresh() {
+  local held limit
+  held=$(fm_lock_owner_held_for "$OWNER_LOCK") || return 1
+  case "$held" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  limit=$(( $(fm_arm_confirm_timeout) + EPOCH_FRESH ))
+  [ "$held" -lt "$limit" ]
+}
+
 autoarm_owns_recovery() {
   local pid role outcome age
   fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && return 0
   pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
   role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
-  if fm_pid_alive "$pid" && [ "$role" = autoarm ]; then
+  if fm_pid_alive "$pid" && [ "$role" = autoarm ] && autoarm_claim_is_fresh; then
     [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
     return 0
   fi
@@ -281,7 +317,11 @@ terminal_fail_open() {
   if ! fm_lock_try_acquire "$OWNER_LOCK"; then
     pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
     role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
-    if fm_pid_alive "$pid" && [ "$role" = autoarm ]; then
+    # Stepping aside for a peer firing costs the caller a silent exit 0, so the
+    # claim must clear the same freshness bar as autoarm_owns_recovery. A truly
+    # concurrent firing is seconds old and still steps this one aside; a stale
+    # claim now falls through to the warning instead of suppressing it.
+    if fm_pid_alive "$pid" && [ "$role" = autoarm ] && autoarm_claim_is_fresh; then
       return 2
     fi
     return 1

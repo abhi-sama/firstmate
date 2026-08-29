@@ -1172,6 +1172,61 @@ test_hook_claude_mode_reblocks_x_mode_without_tasks() {
   pass "fm-turnend-guard --claude: X-mode-only homes re-block when auto-arm recovery is absent"
 }
 
+# Backdate a path so a claim's measured age can be driven independently of when
+# the fixture created it. GNU and BSD date disagree on epoch rendering, so try
+# BSD's -r first and fall back to GNU's -d @.
+set_claim_mtime() {  # <epoch> <path>
+  local epoch=$1 path=$2 stamp
+  if stamp=$(date -r "$epoch" +%Y%m%d%H%M.%S 2>/dev/null); then
+    touch -t "$stamp" "$path"
+  else
+    stamp=$(date -d "@$epoch" +%Y%m%d%H%M.%S)
+    touch -t "$stamp" "$path"
+  fi
+}
+
+# A live auto-arm claim is evidence that recovery is under way only while it is
+# fresh. This claim is 120s old: far past the guard's auto-arm evidence window,
+# yet still well inside the auto-arm's own 900s takeover window, so nothing else
+# in the stack has acted on it. That is exactly the interval in which supervision
+# used to be silently off - the guard allowed every stop AND suppressed the
+# blind-turn warning. The holder is a real live process, so only the claim's AGE
+# separates this case from the fresh-claim case asserted directly below it.
+test_hook_claude_mode_warns_when_autoarm_claim_is_stale() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-stale-claim")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  record_autoarm_owner "$dir" "$pid"
+  set_claim_mtime "$(( $(date +%s) - 120 ))" "$dir/state/.claude-autoarm.lock"
+  out=$(run_hook_claude "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a stale auto-arm claim must not allow the turn to end blind"
+  assert_contains "$out" 'TURN WOULD END BLIND' \
+    "a stale auto-arm claim suppressed the blind-turn warning"
+  assert_contains "$out" 'did not claim this home either' \
+    "the stale-claim block omitted the auto-arm recovery line"
+
+  # The SAME 120s claim must be judged fresh once the arm is allowed to take
+  # that long, which is what proves the bound is derived from the arm's own
+  # confirm timeout rather than frozen at one platform's number. Without this,
+  # a hardcoded bound would pass the assertions above and still falsely block a
+  # healthy arm wherever the platform default is larger.
+  sleep 60 &
+  pid=$!
+  record_autoarm_owner "$dir" "$pid"
+  set_claim_mtime "$(( $(date +%s) - 120 ))" "$dir/state/.claude-autoarm.lock"
+  out=$(FM_ARM_CONFIRM_TIMEOUT=600 run_hook_claude "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" \
+    "a claim still inside a longer arm timeout must remain trusted"
+  [ -z "$out" ] || fail "a still-fresh auto-arm claim produced output: $out"
+  pass "fm-turnend-guard --claude: a stale auto-arm claim no longer suppresses the warning"
+}
+
 test_hook_claude_mode_allows_when_autoarm_owner_alive() {
   local dir pid out out2 status status2 count count2
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-owner")
@@ -1646,6 +1701,7 @@ test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
+test_hook_claude_mode_warns_when_autoarm_claim_is_stale
 test_hook_claude_mode_allows_when_autoarm_owner_alive
 test_hook_claude_mode_repeated_failed_to_arming_interleavings_reach_fail_open
 test_hook_claude_mode_terminal_boundary_excludes_starting_owner

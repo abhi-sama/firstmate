@@ -202,6 +202,57 @@ fm_lock_clean_known_files() {
     2>/dev/null || true
 }
 
+# Process-local record of the locks THIS shell currently holds.
+#
+# A signal landing inside a lock's critical section runs the EXIT trap, and that
+# cleanup path re-enters the same lock to finish the transition it interrupted.
+# The generic recovery path in fm_lock_try_acquire cannot help there: it only
+# reclaims a lock whose recorded owner is DEAD, and this owner is alive by
+# construction because it is the caller itself. Without this record the exit
+# trap spins in fm_lock_acquire_wait forever, waiting on a claim it orphaned.
+#
+# A recorded pid alone cannot prove self-ownership, because a dead process that
+# held this pid before us leaves a claim that reads identically. Self-ownership
+# therefore requires BOTH this in-memory record and a matching recorded pid, so
+# a recycled pid still falls through to ordinary stale-lock recovery, and a
+# subshell - which inherits the record but has its own BASHPID - still blocks.
+#
+# Initialized preserving any existing value: bin/fm-teardown.sh and
+# bin/fm-pending-reply-lib.sh source this library more than once, and a plain
+# reset would silently discard a claim already recorded by an earlier source.
+FM_LOCK_SELF_HELD=${FM_LOCK_SELF_HELD-}
+
+fm_lock_self_holds() {  # <lockdir>
+  case "$FM_LOCK_SELF_HELD" in
+    *"|$1|"*) return 0 ;;
+  esac
+  return 1
+}
+
+fm_lock_self_note_held() {  # <lockdir>
+  fm_lock_self_holds "$1" || FM_LOCK_SELF_HELD="${FM_LOCK_SELF_HELD}|$1|"
+}
+
+fm_lock_self_forget_held() {  # <lockdir>
+  FM_LOCK_SELF_HELD=${FM_LOCK_SELF_HELD//"|$1|"/}
+}
+
+# True when <lockdir>'s current claim is this very process's own, per the two
+# independent proofs above.
+fm_lock_held_by_self() {  # <lockdir>
+  local lockdir=$1 ownerdir pid
+  fm_lock_self_holds "$lockdir" || return 1
+  if [ -L "$lockdir" ]; then
+    ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
+    [ -n "$ownerdir" ] || return 1
+    pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
+  else
+    [ -d "$lockdir" ] || return 1
+    pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  fi
+  [ "$pid" = "${BASHPID:-$$}" ]
+}
+
 fm_lock_set_role() {
   local lockdir=$1 role=$2 current pid back
   case "$role" in
@@ -306,6 +357,7 @@ fm_lock_claim() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
+  fm_lock_self_note_held "$lockdir"
   return 0
 }
 
@@ -338,6 +390,7 @@ fm_lock_try_create() {
 
 fm_lock_remove_path() {
   local lockdir=$1 ownerdir
+  fm_lock_self_forget_held "$lockdir"
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     rm -f "$lockdir" 2>/dev/null || return 1
@@ -639,6 +692,20 @@ fm_lock_try_acquire() {
     return 0
   fi
 
+  # A claim this process already owns is re-entered, never waited on. Reaching
+  # here with our own claim means a signal interrupted a critical section and
+  # the cleanup path is finishing that transition; blocking would deadlock it
+  # against itself, and the alternative - abandoning the transition on a timeout
+  # - would drop the recovery evidence a successor needs.
+  #
+  # FM_LOCK_OWNER_DIR is deliberately left unset: the steal-lock caller below
+  # treats an unset owner as a lost race and refuses, so a trap re-entering
+  # mid-steal declines to break a primary lock rather than completing a takeover
+  # its interrupted outer frame had only started.
+  if fm_lock_held_by_self "$lockdir"; then
+    return 0
+  fi
+
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   if fm_pid_alive "$pid"; then
     FM_LOCK_HELD_PID=$pid
@@ -760,6 +827,7 @@ fm_lock_break_wedged_owner() {  # <lockdir> <expected-owner-pid>
 # the same owner it removes.
 _fm_lock_break_verified_owner() {  # <lockdir> <expected-owner-pid>
   local lockdir=$1 expected=$2 ownerdir actual aside
+  [ "$expected" != "${BASHPID:-$$}" ] || fm_lock_self_forget_held "$lockdir"
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     [ -n "$ownerdir" ] || return 2
@@ -807,6 +875,27 @@ fm_lock_owner_held_for() {  # <lockdir>
   fm_path_age "$lockdir"
 }
 
+# How long a freshly forked watcher may take to acquire the lock and beat, and
+# therefore the longest a legitimate FOREGROUND arm can hold a claim while it
+# waits. Git Bash/MSYS pays a much higher fork cost while the watcher completes
+# its required pre-lock migration, so its bounded default covers that cold start.
+#
+# Owned here rather than in bin/fm-watch-arm.sh because two callers need one
+# answer: the arm waits this long, and bin/fm-turnend-guard.sh sizes its trust of
+# a live auto-arm claim from it. An operator raising FM_ARM_CONFIRM_TIMEOUT moves
+# both together, so the guard can never judge a still-legitimate arm stale.
+fm_arm_confirm_timeout() {
+  local default
+  case "${OSTYPE:-}" in
+    msys*|mingw*|cygwin*) default=30 ;;
+    *) default=10 ;;
+  esac
+  case "${FM_ARM_CONFIRM_TIMEOUT:-}" in
+    ''|*[!0-9]*) printf '%s\n' "$default" ;;
+    *) printf '%s\n' "$FM_ARM_CONFIRM_TIMEOUT" ;;
+  esac
+}
+
 fm_lock_acquire_wait() {
   local lockdir=$1
   while ! fm_lock_try_acquire "$lockdir"; do
@@ -817,6 +906,9 @@ fm_lock_acquire_wait() {
 fm_lock_release() {
   local lockdir=$1 pid current ownerdir
   current=${BASHPID:-$$}
+  # Forget unconditionally: either this call gives the claim up, or the recorded
+  # owner is not us and we did not hold it in the first place.
+  fm_lock_self_forget_held "$lockdir"
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     [ -n "$ownerdir" ] || return 0

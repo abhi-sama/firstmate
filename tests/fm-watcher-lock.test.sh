@@ -339,6 +339,112 @@ test_lock_does_not_steal_live_lock() {
   pass "live-held lock is not stolen"
 }
 
+# A signal landing inside a critical section leaves this process's OWN claim on
+# the lock, and the exit trap then re-enters that same lock to finish the
+# interrupted transition - the shape bin/fm-watch.sh's watcher_cleanup reaches
+# through fm_recovery_transition's release-lock-existing path. The generic
+# recovery path cannot help, because the recorded owner is alive by construction:
+# it is the caller. Before the self-ownership record this deadlocked the exit
+# trap forever, so the bound below must FAIL rather than hang when it regresses.
+test_lock_signal_orphaned_self_claim_is_reclaimed() {
+  local dir state lockdir victim i
+  dir=$(make_case lock-self-reclaim)
+  state="$dir/state"
+  lockdir="$state/.selfclaim.lock"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lockdir=$2
+    done_marker=$3
+    held_marker=$4
+    cleanup() {
+      fm_lock_acquire_wait "$lockdir"
+      fm_lock_release "$lockdir"
+      printf "reclaimed\n" > "$done_marker"
+    }
+    trap cleanup EXIT
+    trap "exit 1" TERM
+    fm_lock_acquire_wait "$lockdir"
+    printf "held\n" > "$held_marker"
+    while :; do sleep 0.1; done
+  ' _ "$LIB" "$lockdir" "$dir/done" "$dir/held" &
+  victim=$!
+
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ -s "$dir/held" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$dir/held" ] || { kill -KILL "$victim" 2>/dev/null || true; fail "victim never entered its critical section"; }
+  [ "$(cat "$lockdir/pid" 2>/dev/null || cat "$(readlink "$lockdir")/pid" 2>/dev/null || true)" = "$victim" ] \
+    || fail "victim did not record itself as the lock owner"
+
+  kill -TERM "$victim" 2>/dev/null || fail "could not signal the victim mid critical-section"
+  i=0
+  while [ "$i" -lt 100 ]; do
+    kill -0 "$victim" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$victim" 2>/dev/null; then
+    kill -KILL "$victim" 2>/dev/null || true
+    wait "$victim" 2>/dev/null || true
+    fail "exit trap deadlocked re-acquiring the claim this process orphaned itself"
+  fi
+  wait "$victim" 2>/dev/null || true
+  [ "$(cat "$dir/done" 2>/dev/null || true)" = reclaimed ] \
+    || fail "exit trap did not complete the interrupted transition"
+  [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] \
+    || fail "reclaimed lock was not released by the exit trap"
+  pass "a signal-orphaned self claim is reclaimed by its own exit trap"
+}
+
+# Self-ownership must rest on this process's own acquisition record, never on a
+# bare pid comparison. A process that died holding this pid before us leaves a
+# claim that reads identically, and fast-pathing it would skip the stale-lock
+# recovery that claim actually needs. Both sides are asserted together so the
+# check cannot go vacuous by collapsing to one answer.
+test_lock_recycled_pid_claim_is_not_self_owned() {
+  local dir state forged genuine out
+  dir=$(make_case lock-self-identity)
+  state="$dir/state"
+  forged="$state/.forged.lock"
+  genuine="$state/.genuine.lock"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    forged=$2
+    genuine=$3
+    mkdir "$forged"
+    printf "%s\n" "${BASHPID:-$$}" > "$forged/pid"
+    if fm_lock_held_by_self "$forged"; then forged_self=yes; else forged_self=no; fi
+    if fm_lock_try_acquire "$forged"; then forged_acq=0; else forged_acq=1; fi
+    fm_lock_try_acquire "$genuine" || exit 7
+    if fm_lock_held_by_self "$genuine"; then genuine_self=yes; else genuine_self=no; fi
+    if fm_lock_try_acquire "$genuine"; then genuine_acq=0; else genuine_acq=1; fi
+    printf "forged_self=%s forged_acq=%s genuine_self=%s genuine_acq=%s\n" \
+      "$forged_self" "$forged_acq" "$genuine_self" "$genuine_acq"
+  ' _ "$LIB" "$forged" "$genuine") || fail "self-identity probe failed to run: $out"
+
+  case "$out" in
+    *"forged_self=no"*) ;;
+    *) fail "a claim this process never made was treated as self-owned: $out" ;;
+  esac
+  case "$out" in
+    *"forged_acq=1"*) ;;
+    *) fail "a forged same-pid claim took the self-owned fast path: $out" ;;
+  esac
+  case "$out" in
+    *"genuine_self=yes"*) ;;
+    *) fail "this process's own claim was not recognised as self-owned: $out" ;;
+  esac
+  case "$out" in
+    *"genuine_acq=0"*) ;;
+    *) fail "re-entering this process's own claim did not succeed: $out" ;;
+  esac
+  pass "self-ownership needs this process's own claim, not a matching pid"
+}
+
 test_lock_empty_pid_uses_minimum_grace() {
   local dir state lockdir out
   dir=$(make_case lock-empty-grace)
@@ -1111,6 +1217,8 @@ test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
+test_lock_signal_orphaned_self_claim_is_reclaimed
+test_lock_recycled_pid_claim_is_not_self_owned
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
