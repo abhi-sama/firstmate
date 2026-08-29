@@ -72,6 +72,15 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Ship and scout Rules always carry a fixed "Production safety" rule (item 8):
+# never sign into a production or shared account, never take over or displace a
+# shared/always-on service or its port, never copy secrets into the worktree,
+# never attempt an auth bypass, and prefer a repo's own fixture/seed path over
+# ad-hoc browser driving. It generalizes rule 7's no-mistakes-daemon case to
+# every shared or hosted system, so it lives once and is referenced, not
+# restated. A secondmate charter delegates hands-on work to its own crewmates,
+# who get this rule through their own ship/scout briefs, so the charter itself
+# does not repeat it.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -382,6 +391,22 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# Production safety is a fixed scaffold rule so a crewmate always carries it,
+# regardless of whether the {TASK} text mentions it. It generalizes rule 7's
+# no-mistakes-daemon case (never take over a shared service) to every shared
+# or hosted system a task might touch: a production account, a live database,
+# a port another service owns, or credentials that must not leave the worktree.
+IFS= read -r -d '' PROD_SAFETY <<'EOF' || true
+8. Production safety, extending rule 7 above from the no-mistakes daemon to every shared or hosted system:
+   a. Never sign into a production, shared, or the operator's own account or session, and never touch real projects, tickets, or customer data; use a local instance with the repo's own fixture or seed data.
+   b. Never take over, stop, restart, or displace another shared or always-on service, or bind a port it already owns; choose a free port instead.
+   c. Never copy credentials or env files holding secrets into this worktree - it returns to a shared pool.
+   d. Never attempt an auth bypass or token manipulation; if auth blocks you, append `blocked: {why}` and stop.
+   e. Taking over a shared service, or copying credentials, needs `needs-decision: {why}` BEFORE you do it, not a status line after.
+   f. Before browser or UI verification, look for the repo's own deterministic fixture, seed, or capture path and prefer it over ad-hoc browser driving.
+EOF
+PROD_SAFETY=${PROD_SAFETY%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 $PROVENANCE
@@ -421,6 +446,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$PROD_SAFETY
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -539,6 +565,7 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$PROD_SAFETY
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
