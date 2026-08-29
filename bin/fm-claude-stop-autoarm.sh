@@ -73,6 +73,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 EPOCH="$STATE/.claude-autoarm-epoch"
+ARMING="$STATE/.claude-autoarm-arming"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 CONTENDED="$STATE/.claude-autoarm-contended"
@@ -240,6 +241,22 @@ if ! fm_lock_set_role "$OWNER_LOCK" autoarm; then
 fi
 trap 'fm_lock_release "$OWNER_LOCK"' EXIT
 
+# Republished at the top of every attempt below, and once here so a claim is
+# never live without one. This is what bin/fm-turnend-guard.sh reads to tell an
+# arm that is under way from a claim that is merely still held: the claim spans
+# every attempt and, on the success path, the whole watcher cycle, so its own age
+# says nothing about whether recovery is running right now.
+#
+# Never removed. A marker left behind by a finished or dispossessed owner only
+# ages out, which is the safe direction - the guard then warns rather than
+# suppressing - while removing it on exit would race a successor that has taken
+# the claim over and is arming under its own refreshed marker.
+publish_arming() {
+  : > "$ARMING" 2>/dev/null || true
+}
+
+publish_arming
+
 # The takeover above removes a wedged owner's claim but deliberately leaves that
 # process running, so this hook must never assume it still holds what it claimed.
 # A dispossessed owner that finally resumes - a blocked arm waking after the
@@ -289,6 +306,7 @@ HEALTHY=0
 attempt=0
 while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   attempt=$((attempt + 1))
+  publish_arming
   OUT=$(mktemp "$STATE/.claude-autoarm-output.XXXXXX") || OUT=
   if [ -n "$OUT" ]; then
     "$SCRIPT_DIR/fm-watch-arm.sh" >"$OUT" 2>&1 || true

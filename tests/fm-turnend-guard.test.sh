@@ -1107,11 +1107,16 @@ seed_claude_budget() {
   printf 'session=sess-claude-mode\ncount=%s\nepoch=%s\n' "$count" "$epoch" > "$dir/state/.turnend-claude-blocks"
 }
 
+# Mirrors what the real auto-arm publishes when it claims a home: the owner
+# lock AND the arm-attempt marker it republishes at the top of every attempt.
+# A claim without that marker is not recovery proof, which the freshness tests
+# below drive deliberately rather than by omission.
 record_autoarm_owner() {
   local dir=$1 pid=$2
   mkdir -p "$dir/state/.claude-autoarm.lock"
   printf '%s\n' "$pid" > "$dir/state/.claude-autoarm.lock/pid"
   printf 'autoarm\n' > "$dir/state/.claude-autoarm.lock/role"
+  : > "$dir/state/.claude-autoarm-arming"
 }
 
 install_integrated_autoarm() {
