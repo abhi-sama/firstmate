@@ -48,7 +48,9 @@
 #   1. a live identity-matched watcher with a fresh beacon allows immediately;
 #   2. otherwise wait briefly (FM_CLAUDE_AUTOARM_SYNC_WAIT_MS, default 800ms)
 #      for the auto-arm to claim this home (state/.claude-autoarm.lock owner
-#      alive) or to record a fresh actionable exit-2 outcome
+#      alive with an arm attempt still under way, per state/.claude-autoarm-arming
+#      - see autoarm_arm_is_under_way) or to record a fresh
+#      actionable exit-2 outcome
 #      (state/.claude-autoarm-epoch) for this event epoch - either proof allows
 #      without consuming a continuation, so one event epoch yields exactly one recovery turn;
 #      the first fresh exhausted-failure epoch preserves the bounded progression,
@@ -131,6 +133,7 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 BUDGET_FILE="$STATE/.turnend-claude-blocks"
 BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
+ARMING="$STATE/.claude-autoarm-arming"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
@@ -237,12 +240,52 @@ budget_account_current_epoch() {
   return 0
 }
 
+# A live autoarm claim proves recovery is under way only while an arm attempt
+# under it is actually running.
+#
+# Control reaches this test only after fm_watcher_healthy has already returned
+# false, so supervision is known to be down at this instant. Trusting the holder
+# here is a bet that it is actively arming, and an unbounded bet lets one wedged
+# claim allow every stop AND suppress the blind-turn warning until the auto-arm's
+# own takeover window (FM_CLAUDE_AUTOARM_WEDGE_AFTER, default 900s) expires.
+#
+# The measured quantity is the arm, not the claim. A legitimate claim is not
+# short-lived: bin/fm-claude-stop-autoarm.sh takes it once and keeps it across
+# every attempt of its bounded retry loop, and on the success path its foreground
+# arm blocks for the whole watcher cycle - the Stop hook carries a multi-hour
+# timeout precisely so it can. Bounding by the claim's own age would judge that
+# hours-old holder stale the moment its watcher stopped being healthy and warn
+# while recovery was genuinely under way. The auto-arm therefore republishes
+# state/.claude-autoarm-arming at the top of every attempt, and its age is how
+# long the CURRENT arm has been running.
+#
+# That age is bounded by what one arm attempt costs before it can confirm a
+# watcher: fm_arm_confirm_timeout - 10s normally, 30s on Git Bash/MSYS, and
+# whatever an operator sets FM_ARM_CONFIRM_TIMEOUT to - plus EPOCH_FRESH, the
+# same evidence-freshness margin this guard already applies to the auto-arm
+# outcome record. Both terms come from existing owners, so a raised arm timeout
+# moves this bound with it and no new knob is introduced. The retry count drops
+# out of the formula entirely because each attempt republishes the marker.
+#
+# The auto-arm's 900s threshold is deliberately NOT reused: it is a takeover
+# threshold for a claim, not a statement about an arm. A missing or unreadable
+# marker is untrustworthy rather than fresh, so it falls through to the warning.
+autoarm_arm_is_under_way() {
+  local age limit
+  age=$(fm_path_age "$ARMING") || return 1
+  case "$age" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  limit=$(( $(fm_arm_confirm_timeout) + EPOCH_FRESH ))
+  [ "$age" -lt "$limit" ]
+}
+
 autoarm_owns_recovery() {
   local pid role outcome age
   fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && return 0
   pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
   role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
-  if fm_pid_alive "$pid" && [ "$role" = autoarm ]; then
+  if fm_pid_alive "$pid" && [ "$role" = autoarm ] && autoarm_arm_is_under_way; then
     [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
     return 0
   fi
@@ -281,7 +324,11 @@ terminal_fail_open() {
   if ! fm_lock_try_acquire "$OWNER_LOCK"; then
     pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
     role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
-    if fm_pid_alive "$pid" && [ "$role" = autoarm ]; then
+    # Stepping aside for a peer firing costs the caller a silent exit 0, so the
+    # holder must clear the same bar as autoarm_owns_recovery. A truly concurrent
+    # firing is arming right now and still steps this one aside; a holder with no
+    # arm under way falls through to the warning instead of suppressing it.
+    if fm_pid_alive "$pid" && [ "$role" = autoarm ] && autoarm_arm_is_under_way; then
       return 2
     fi
     return 1

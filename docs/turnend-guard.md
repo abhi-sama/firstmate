@@ -61,7 +61,10 @@ In the default Codex mode, a true value lets the second stop finish after one fo
 
 Claude runs the guard with `--claude`, which ignores `stop_hook_active` and cooperates with the Stop-owned auto-arm.
 Claude Code sets `stop_hook_active=true` on every stop after any stop-hook continuation, including `asyncRewake` rewakes, which re-opened the 2026-07-21 blind window under the default one-shot behavior.
-The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 milliseconds) and allows the stop when the watcher is healthy, `state/.claude-autoarm.lock` has a live `autoarm` role owner whose eventual failure must exit 2, or `state/.claude-autoarm-epoch` contains a fresh actionable rewake owned by this event epoch.
+The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 milliseconds) and allows the stop when the watcher is healthy, `state/.claude-autoarm.lock` has a live `autoarm` role owner with an arm attempt still under way and whose eventual failure must exit 2, or `state/.claude-autoarm-epoch` contains a fresh actionable rewake owned by this event epoch.
+An arm counts as under way while `state/.claude-autoarm-arming` is newer than one attempt's watcher-confirm timeout (10 seconds, 30 on Git Bash/MSYS, or `FM_ARM_CONFIRM_TIMEOUT`) plus the `FM_CLAUDE_AUTOARM_EPOCH_FRESH` evidence margin.
+The auto-arm republishes that marker at the top of every attempt, so the measured age tracks the current arm rather than the claim, which it holds across every attempt and, on the success path, for the whole watcher cycle.
+A holder with no arm under way is no longer read as recovery, so one wedged inside the auto-arm's own `FM_CLAUDE_AUTOARM_WEDGE_AFTER` takeover window can no longer suppress the blind-turn warning.
 Fresh `failed` and `failed-suppressed` outcomes enter or advance the failure progression instead of acting as unconditional recovery proof.
 The auto-arm itself rechecks the healthy watcher predicate and retries a bounded number of times before reporting a genuine failure.
 The first fresh exhausted-failure epoch preserves its handoff without consuming a blocked-stop count, while later fresh failed epochs advance the same monotonic progression instead of resetting it.

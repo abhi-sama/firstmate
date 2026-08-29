@@ -69,14 +69,10 @@ WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
 GRACE=${FM_GUARD_GRACE:-300}
-# How long to wait for a freshly forked watcher to acquire the lock and beat.
-# Git Bash/MSYS pays a much higher fork cost while the watcher completes its
-# required pre-lock migration, so its bounded default covers that cold start.
-case "${OSTYPE:-}" in
-  msys*|mingw*|cygwin*) ARM_CONFIRM_DEFAULT=30 ;;
-  *) ARM_CONFIRM_DEFAULT=10 ;;
-esac
-CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
+# How long to wait for a freshly forked watcher to acquire the lock and beat;
+# fm_arm_confirm_timeout owns the platform defaults and the env override, so the
+# turn-end guard sizes its auto-arm claim trust from the same answer.
+CONFIRM_TIMEOUT=$(fm_arm_confirm_timeout)
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
