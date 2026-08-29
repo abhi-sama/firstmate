@@ -261,6 +261,10 @@ fm_self_pid_resolve() {
 # outside [A-Za-z0-9] folded to _. Two distinct locks can fold to one key; that
 # only ever yields the wrong owner directory, which then fails verification, so
 # a collision costs a re-entry, never a false claim of ownership.
+#
+# Nothing here is reset at source time, which matters because bin/fm-teardown.sh
+# and bin/fm-pending-reply-lib.sh source this library more than once: a claim
+# recorded by an earlier source survives the later ones.
 _fm_lock_self_slot() {  # <lockdir>; sets _FM_LOCK_SELF_SLOT
   _FM_LOCK_SELF_SLOT="FM_LOCK_SELF_OWNER_${1//[!A-Za-z0-9]/_}"
 }
