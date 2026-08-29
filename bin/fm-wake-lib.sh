@@ -215,9 +215,14 @@ fm_lock_clean_known_files() {
 # command substitution, background job, pipeline stage and process substitution.
 # There the answer comes from the one place that can still tell them apart: a
 # child process's own view of who its parent is. The child is forked directly by
-# this shell, so its $PPID is this shell's real pid. /dev/fd is required for the
-# process substitution below and is present wherever a BASHPID-less bash is -
-# Git Bash/MSYS, the other platform this stack supports, ships bash 4+.
+# this shell, so its $PPID is this shell's real pid.
+#
+# The child MUST be forked directly by this shell, so it is spelled as a process
+# substitution, never $(...). $(...) is wrong: bash does not exec-optimize the
+# command-substitution fork while an EXIT trap is running, which is exactly when
+# this is asked, so the child's parent is an intermediate fork rather than this
+# shell. Measured in an EXIT trap under bash 3.2.57: $(sh -c 'echo $PPID')
+# reports a fresh pid, this form reports the shell's own.
 #
 # On a shell where neither source works, FM_SELF_PID falls back to $$ so lock
 # records keep the pid they have always carried, and the non-zero return makes
@@ -257,27 +262,61 @@ fm_self_pid_resolve() {
 # written for a claim that then loses its race, simply verifies false, so
 # nothing has to drop it inside a window a signal could land in.
 #
-# One shell variable per lock, keyed by the lock's path with every character
-# outside [A-Za-z0-9] folded to _. Two distinct locks can fold to one key; that
-# only ever yields the wrong owner directory, which then fails verification, so
-# a collision costs a re-entry, never a false claim of ownership.
+# Held as ONE string of "|<lockdir>::<ownerdir>|" entries rather than one shell
+# variable per lock. A computed variable name would need printf -v "$name" and
+# ${!name}, and ShellCheck reads an assignment to a name it cannot resolve as an
+# assignment to ANY name: every script that sources this library then reports
+# its own $! as modified in a subshell. Measured - that spelling produced 12
+# such findings across two unrelated test files, and this one produces none.
 #
-# Nothing here is reset at source time, which matters because bin/fm-teardown.sh
-# and bin/fm-pending-reply-lib.sh source this library more than once: a claim
-# recorded by an earlier source survives the later ones.
-_fm_lock_self_slot() {  # <lockdir>; sets _FM_LOCK_SELF_SLOT
-  _FM_LOCK_SELF_SLOT="FM_LOCK_SELF_OWNER_${1//[!A-Za-z0-9]/_}"
+# Initialized preserving any existing value: bin/fm-teardown.sh and
+# bin/fm-pending-reply-lib.sh source this library more than once, and a plain
+# reset would silently discard a claim already recorded by an earlier source.
+FM_LOCK_SELF_HELD=${FM_LOCK_SELF_HELD-}
+
+# Drop any entry for <lockdir>, whatever owner it names, so the record stays
+# bounded by the number of distinct locks. Rebuilt one entry at a time because a
+# glob delete would match greedily across neighbouring entries. A malformed
+# record ends the walk instead of spinning on it.
+fm_lock_self_forget_lock() {  # <lockdir>
+  local rest=$FM_LOCK_SELF_HELD kept='' entry prev
+  while [ -n "$rest" ]; do
+    prev=$rest
+    entry=${rest#"|"}
+    entry=${entry%%"|"*}
+    rest=${rest#"|$entry|"}
+    [ "$rest" != "$prev" ] || break
+    case "$entry" in
+      "$1::"*) ;;
+      *) kept="$kept|$entry|" ;;
+    esac
+  done
+  FM_LOCK_SELF_HELD=$kept
 }
 
 fm_lock_self_note_held() {  # <lockdir> <ownerdir>
-  _fm_lock_self_slot "$1"
-  printf -v "$_FM_LOCK_SELF_SLOT" '%s' "$2"
+  fm_lock_self_forget_lock "$1"
+  FM_LOCK_SELF_HELD="$FM_LOCK_SELF_HELD|$1::$2|"
 }
 
 fm_lock_self_owner_dir() {  # <lockdir>; sets FM_LOCK_SELF_OWNER
-  _fm_lock_self_slot "$1"
-  FM_LOCK_SELF_OWNER=${!_FM_LOCK_SELF_SLOT:-}
-  [ -n "$FM_LOCK_SELF_OWNER" ]
+  local rest=$FM_LOCK_SELF_HELD entry prev
+  FM_LOCK_SELF_OWNER=
+  while [ -n "$rest" ]; do
+    prev=$rest
+    entry=${rest#"|"}
+    entry=${entry%%"|"*}
+    rest=${rest#"|$entry|"}
+    [ "$rest" != "$prev" ] || break
+    case "$entry" in
+      "$1::"*)
+        FM_LOCK_SELF_OWNER=${entry#"$1::"}
+        [ -n "$FM_LOCK_SELF_OWNER" ] && return 0
+        return 1
+        ;;
+    esac
+  done
+  return 1
 }
 
 # True when <lockdir>'s current claim is this very process's own.
