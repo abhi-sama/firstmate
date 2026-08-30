@@ -220,7 +220,15 @@ readiness_env() {
   FM_SUPERVISOR_BACKEND=tmux
   FM_COMPOSER_UNREADABLE_SECS=300
   FM_WEDGE_ALARM_EXEC="$TMP_ROOT/notify.sh"
-  export FM_SUPERVISOR_TARGET FM_SUPERVISOR_BACKEND FM_COMPOSER_UNREADABLE_SECS FM_WEDGE_ALARM_EXEC
+  # Pin the channel instead of leaving it "auto". auto resolves per PLATFORM -
+  # osascript on macOS, and NOTHING on Linux, where wedge_alarm_notify logs that
+  # the marker is the only signal and never reaches the notifier seam. Leaving it
+  # auto made this assertion pass on a mac and fail in Linux CI. The seam below
+  # intercepts before any real notifier runs, so naming a channel is safe on
+  # every platform and makes the assertion mean the same thing everywhere.
+  FM_WEDGE_ALARM_CHANNEL=osascript
+  export FM_SUPERVISOR_TARGET FM_SUPERVISOR_BACKEND FM_COMPOSER_UNREADABLE_SECS
+  export FM_WEDGE_ALARM_EXEC FM_WEDGE_ALARM_CHANNEL
   # The sourced daemon's alarm rate-limit clock. Reset per case so one case's
   # alarm cannot suppress the next one's. ShellCheck cannot see the use because
   # the daemon that reads it is sourced, not declared here.
