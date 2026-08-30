@@ -124,7 +124,8 @@ clear_delivery_artifacts() {
   rm -f \
     "$STATE/.subsuper-escalations" \
     "$STATE/.subsuper-escalations.since" \
-    "$STATE/.subsuper-inject-wedged"
+    "$STATE/.subsuper-inject-wedged" \
+    "$STATE/.subsuper-composer-unreadable"
 }
 
 return_guard() {
@@ -172,6 +173,13 @@ return_reconcile() {
   if [ -s "$STATE/.subsuper-inject-wedged" ]; then
     wedge=$(head -1 "$STATE/.subsuper-inject-wedged" 2>/dev/null || true)
     append_evidence wedge "$wedge" "$evidence"
+  fi
+  # A composer that went unreadable while away is why escalations could not be
+  # delivered; surface it beside the delivery evidence rather than only in the log.
+  if [ -s "$STATE/.subsuper-composer-unreadable" ]; then
+    append_evidence composer \
+      "supervisor composer was unreadable while away; escalations could not be injected (see state/.supervise-daemon.log)" \
+      "$evidence"
   fi
   if [ -s "$STATE/.subsuper-escalations" ]; then
     escalations=$(cat "$STATE/.subsuper-escalations" 2>/dev/null || true)

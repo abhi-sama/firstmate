@@ -9,6 +9,9 @@
 # the stub. This guard launches every INSTALLED verified harness idle in an
 # isolated tmux server and requires the real fm_tmux_composer_state to reach
 # `empty`, failing loudly with the harness name and version. It also proves:
+#   - that the same real capture still classifies on the CURSORLESS capability
+#     profiles every non-tmux backend uses, since tmux's cursor anchor hides
+#     defects in the bottom-most-shape selector (task fm-afk-composer-wedge);
 #   - the strict blank-row posture live: a plain shell pane with a blank
 #     cursor row must classify unknown and defer injection;
 #   - the zellij false-positive regression live (when zellij is installed): a
@@ -112,8 +115,47 @@ check_harness_idle_empty() {  # <name> <launch-cmd...>
   else
     CHECKED=$((CHECKED + 1))
     pass "$name ($version): real idle composer classifies empty"
+    check_cursorless_profiles "$name" "$version" "$SESSION:$win"
   fi
   tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+}
+
+# The tmux verdict above is anchored by `#{cursor_y}`: the shape holding the
+# cursor is the composer, so tmux never reaches the cursorless selector. Every
+# other backend (herdr, zellij, cmux, orca) has no cursor and must pick the
+# bottom-most shape instead, which is a materially different code path - and the
+# one that failed in task fm-afk-composer-wedge, where a real claude composer
+# framed by a TITLED rule classified `unknown` on a cursorless backend for 3h16m
+# while the identical bytes classified `empty` under tmux. Re-classify the SAME
+# real vendor capture through the cursorless capability profiles so a shape that
+# only tmux can read cannot pass this guard.
+check_cursorless_profiles() {  # <name> <version> <target>
+  local name=$1 version=$2 target=$3 ansi plain caps label verdict
+  ansi=$(tmux -L "$SOCKET" capture-pane -p -e -t "$target" 2>/dev/null || true)
+  plain=$(tmux -L "$SOCKET" capture-pane -p -t "$target" 2>/dev/null || true)
+  for label in styled-cursorless plain-cursorless; do
+    case "$label" in
+      styled-cursorless) caps=$'styled=1\ncursor=0\nidentity=0\nrows=0'; verdict=$(fm_composer_classify_screen "$caps" "$ansi") ;;
+      plain-cursorless)  caps=$'styled=0\ncursor=0\nidentity=0\nrows=0'; verdict=$(fm_composer_classify_screen "$caps" "$plain") ;;
+    esac
+    case "$verdict" in
+      empty)
+        pass "$name ($version): real idle composer classifies empty on $label backends too"
+        ;;
+      need-identity)
+        # Pi's separated shape is provable only with a live agent identity, which
+        # these profiles deliberately withhold; deferring is the correct answer.
+        note "$name ($version): $label defers pending identity (expected for an identity-gated shape)"
+        ;;
+      *)
+        FAILED=1
+        printf '# %s cursorless (%s) pane tail:\n' "$name" "$label" >&2
+        printf '%s\n' "$plain" | grep '[^[:space:]]' | tail -8 | sed 's/^/#   /' >&2
+        printf 'not ok - %s (%s): idle composer classifies %s on %s backends (tmux read it as empty)\n' \
+          "$name" "$version" "${verdict:-unreadable}" "$label" >&2
+        ;;
+    esac
+  done
 }
 
 # --- 1. Every installed verified harness must reach a proven-empty composer --

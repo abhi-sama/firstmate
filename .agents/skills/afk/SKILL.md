@@ -114,6 +114,23 @@ catch-up if present), a tmux status-line flash when applicable, and a configurab
 `docs/wedge-alarm.md` owns the alert channel setup, and `docs/verification/supervision.md` "Wedge-alarm channels" owns active evidence.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
 
+**Entry pre-flight (the escape the max-defer alarm cannot be).**
+The max-defer alarm escalates by logging louder, which does nothing against a composer that is unreadable for the whole away period: on 2026-08-29 a review-ready PR sat undelivered for 3h16m while the alarm fired correctly every five minutes into an empty room.
+The captain IS present at entry, so the daemon proves the composer classifiable there instead.
+When away mode is active at startup it samples the supervisor composer, and a verdict that is `unknown` on every sample refuses the whole away session: it exits non-zero explaining what could not be read, clears `state/.afk` so supervision is never left unowned, and records the refusal in the daemon log next to the resolved target and backend.
+A busy pane counts as readable, since the captain has just submitted the command that started the daemon, and a `pending` composer counts as readable, since a half-typed line clears on its own.
+Report the refusal to the captain as-is and fix the pane rather than routing around it; `FM_AFK_PREFLIGHT=0` starts anyway and is only for a case where the captain accepts undelivered escalations.
+On the direct path the refusal is the command's own stderr; through `bin/fm-afk-launch.sh` the visible symptom is only a daemon that never became ready, so read `state/.supervise-daemon.log` for the reason.
+
+**Composer readiness watch (why the entry gate alone is not enough).**
+On the documented claude path this daemon is launched by the captain's own in-pane background tool, so at entry the agent is still mid-turn and the pane only reads busy - which proves the pane exists, not that the composer appearing at the end of that turn can be read.
+That is the state the 2026-08-29 incident started from, so the entry verdict is deferred to a watch that runs for as long as away mode lasts.
+Each housekeeping tick, an IDLE supervisor pane whose composer does not classify starts a clock, and once it passes `FM_COMPOSER_UNREADABLE_SECS` the daemon logs an ERROR, writes `state/.subsuper-composer-unreadable`, and fires the same active alert channel as the delivery alarm.
+A busy pane is skipped rather than counted, and a composer that classifies again clears the clock.
+This fires with an EMPTY escalation buffer, which is the half the max-defer alarm cannot cover: that alarm keys off an escalation already stuck, so it can only warn after an event the captain needed was swallowed.
+`bin/fm-afk-return.sh` surfaces the marker on return, and clears it with the other delivery artifacts.
+`bin/fm-supervise-daemon.sh`'s header owns the sample count, spacing, and their derivation.
+
 ## Submit model
 
 The digest is typed **once** (`send-keys -l` on tmux, `pane send-text` on
@@ -221,7 +238,9 @@ the operational prefix lets firstmate distinguish it from a real captain message
   `"<session>:<pane-id>"` target), then `$TMUX_PANE`, then
   `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then a
   `firstmate:0` fallback with a warning. Both resolution sources are logged at
-  startup so a wrong-but-resolving fallback is detectable. Other runtime
+  startup so a wrong-but-resolving fallback is detectable, and under away mode
+  the entry pre-flight's composer verdict is logged beside them, which is what
+  separates "wrong pane" from "right pane, unreadable shape". Other runtime
   backends, including zellij, orca, and cmux, are not yet supported as
   supervisor backends; the daemon refuses loudly at startup instead of
   misapplying tmux primitives to a pane that isn't one
