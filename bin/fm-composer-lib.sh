@@ -460,17 +460,50 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # exact positive proof they require (`empty`), so unrecognized future verdicts
 # fail safe by default.
 
-# _fm_composer_pi_separator_row: a solid pi separator - nothing but `─`, at
-# least 8 columns wide. The width floor is a literal substring test so it is
-# byte-exact in every locale.
-_fm_composer_pi_separator_row() {  # <trimmed-row>
-  local row=$1
+# _fm_composer_rule_row: 0 when <trimmed-row> is a horizontal RULE. Pi's
+# separators were the first use, hence the FM_COMPOSER_SCAN_PI_* pair state it
+# feeds, but every harness that frames its composer in rules relies on it. The
+# 8-column width floor is a literal substring test, so it stays byte-exact in
+# every locale.
+#
+# A rule is solid `─` (pi's separators, claude's composer frame) or TITLED: a
+# harness may write a caption into its own rule, exactly as grok writes its
+# model name into a box's bottom border (_fm_composer_titled_bottom_ok). Real
+# claude 2.x puts the session title in the rule above its `❯` row
+# ("─── Crewmates invocation and token spend ─"), and task fm-afk-composer-wedge is
+# what that cost: with the titled rule unrecognised, its solid partner below the
+# composer was an UNPAIRED rule, which _fm_composer_select_cursorless treats as
+# a possible pi composer continuing past the capture edge and refuses the whole
+# screen. The away-mode daemon read `unknown` 819 consecutive times over 3h16m
+# on a live, idle, correctly-targeted claude pane and never delivered a
+# review-ready PR. Cursorless backends only (herdr, zellij, cmux, orca); tmux
+# anchors on its cursor row and never reached the bail-out.
+#
+# Recognising the title does NOT widen what counts as a container: a rule is
+# still only structure. The title may not contain any OTHER box-drawing glyph,
+# so a bordered content row (`│ … │`) can never read as a rule.
+_fm_composer_rule_row() {  # <trimmed-row>
+  local row=$1 residue
   [ -n "$row" ] || return 1
-  [ -z "${row//─/}" ] || return 1
+  # A rule opens and closes with the rule glyph and carries a solid run of 8.
   case "$row" in
-    *────────*) return 0 ;;
+    ─*─) ;;
+    *) return 1 ;;
   esac
-  return 1
+  case "$row" in
+    *────────*) ;;
+    *) return 1 ;;
+  esac
+  # Everything that is not the rule glyph is the title; it must be caption text,
+  # never another edge glyph.
+  residue=${row//─/}
+  case "$residue" in
+    *│*|*┃*|*║*|*╭*|*╮*|*┌*|*┐*|*╔*|*╗*|*┏*|*┓*|\
+    *╰*|*╯*|*└*|*┘*|*╚*|*╝*|*┗*|*┛*|*━*|*═*|*'|'*|*+*)
+      return 1
+      ;;
+  esac
+  return 0
 }
 
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2
@@ -522,7 +555,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
     # Pi separator rows: a solid `─` rule at least 8 columns wide. A separator
     # closes the preceding candidate and immediately opens the next, so an
     # earlier transcript rule can never outrank the live bottom composer pair.
-    if _fm_composer_pi_separator_row "$trimmed"; then
+    if _fm_composer_rule_row "$trimmed"; then
       FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=$row
       if [ "$pi_open" -ge 0 ]; then
         FM_COMPOSER_SCAN_PI_PAIR_FOUND=1

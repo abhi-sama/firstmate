@@ -304,6 +304,59 @@ test_matrix_grok_titled_bottom_border() {
   pass "matrix: grok's titled bottom border is tolerated as a title, not read as ambiguity"
 }
 
+# The titled composer rule (task fm-afk-composer-wedge). Real claude 2.x writes
+# the session's own title INTO the top rule of its composer
+# ("\u2500\u2500\u2500 Crewmates invocation and token spend \u2500"), so the pair of rules around the
+# `\u276f` row is no longer two SOLID rules. A titled rule that still opens and
+# closes with the rule glyph is the same structural rule, exactly as a titled
+# box bottom border already is (test_titled_bottom_requires_matching_width); a
+# rule the scan cannot see leaves its partner unpaired, and an unpaired rule
+# BELOW the candidate invalidates the whole screen.
+#
+# Live evidence, 2026-08-29 (home /Users/abhi-sama/github/firstmate, herdr pane
+# default:w2D:p1, claude idle): the away-mode daemon read this exact screen 819
+# consecutive times over 3h16m and returned `unknown` every time, deferring a
+# review-ready PR escalation for the whole away period. Replacing the title with
+# a solid rule - and nothing else - flipped the same capture to `empty`.
+RULE24=$'\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500'
+TITLED=$'\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 Crewmates invocation and token spend \u2500'
+
+test_matrix_claude_titled_composer_rule() {
+  local idle typed
+  idle=$'transcript line\n'"$TITLED"$'\n\u276f'"$NBSP"$'\n'"$RULE24"$'\n  bypass permissions on'
+  assert_screen "claude idle under a titled rule on tmux" empty "$CAPS_TMUX" "$idle" 2 probe-absent
+  assert_screen "claude idle under a titled rule on herdr" empty "$CAPS_STYLED" "$idle" '' probe-absent
+  assert_screen "claude idle under a titled rule on zellij" empty "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "claude idle under a titled rule on cmux/orca" empty "$CAPS_PLAIN" "$idle"
+  # A titled rule below the composer reads the same as a solid one.
+  idle=$'transcript line\n'"$RULE24"$'\n\u276f'"$NBSP"$'\n'"$TITLED"$'\n  bypass permissions on'
+  assert_screen "claude idle above a titled rule" empty "$CAPS_STYLED" "$idle" '' probe-absent
+  # A half-typed line inside the same titled frame is still pending, never empty.
+  typed="$TITLED"$'\n\u276f fix the login bug\n'"$RULE24"
+  assert_screen "claude half-typed under a titled rule" pending "$CAPS_TMUX" "$typed" 1 probe-absent
+  pass "fm_composer_classify_screen: a titled composer rule is a rule, and still refuses typed input"
+}
+
+# The fix above must not become "any rule-ish row is a container". These are the
+# three shapes the guard exists to refuse, asserted inside the SAME titled frame
+# that now classifies: a dead shell, a modal dialog, and a half-typed line.
+test_titled_rule_preserves_injection_refusals() {
+  local dead modal blank
+  # 1. Dead shell: the agent exited, leaving a bare login prompt under the rule.
+  for g in '>' '$' '%' '#'; do
+    dead="$TITLED"$'\n'"$g"$'\n'"$RULE24"
+    assert_screen "dead shell '$g' under a titled rule" unknown "$CAPS_STYLED" "$dead" '' probe-absent
+  done
+  # 2. Modal dialog: claude's own confirmation box drawn where the composer was.
+  #    No agent glyph, so no container proof - the strict blank-row rule holds.
+  modal="$TITLED"$'\n  Do you want to proceed?\n  1. Yes  2. No\n'"$RULE24"
+  assert_screen "modal dialog under a titled rule" unknown "$CAPS_STYLED" "$modal" '' probe-absent
+  # 3. Unidentified blank row between titled rules stays unknown without identity.
+  blank="$TITLED"$'\n\n'"$RULE24"
+  assert_screen "blank row between titled rules" unknown "$CAPS_STYLED_NOID" "$blank"
+  pass "fm_composer_classify_screen: titled rules never soften the dead-shell, modal, or blank-row refusals"
+}
+
 test_matrix_kimi_bordered_shell_glyph_box() {
   # Kimi's bordered `│ > │` composer - the shape fm-spawn.sh's retired
   # spawn-local regex used to own. Now the shared owner proves it everywhere,
@@ -546,6 +599,8 @@ test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_pi_separated_needs_identity
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
+test_matrix_claude_titled_composer_rule
+test_titled_rule_preserves_injection_refusals
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence

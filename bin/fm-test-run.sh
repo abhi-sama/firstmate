@@ -205,7 +205,7 @@ family_for_basename() {
     fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;
-    fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
+    fm-afk-inject-e2e.test.sh|fm-afk-preflight-e2e.test.sh|fm-afk-return.test.sh)
       printf '%s\n' afk
       ;;
     fm-bearings-snapshot.test.sh|fm-fleet-snapshot-view.test.sh)
@@ -376,6 +376,7 @@ portable_serial_weight_hints() {
   cat <<'EOF'
 tests/fm-afk-inject-e2e.test.sh 34019
 tests/fm-afk-pi-herdr-return-e2e.test.sh 42
+tests/fm-afk-preflight-e2e.test.sh 31000
 tests/fm-afk-return.test.sh 1105
 tests/fm-ask-user-authority.test.sh 68
 tests/fm-backend-cmux-smoke.test.sh 29

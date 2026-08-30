@@ -105,6 +105,20 @@
 #                                   undelivered before one normal flush attempt;
 #                                   if that cannot confirm a submit, a wedge
 #                                   alarm fires (default 300; 0 disables)
+#          FM_AFK_PREFLIGHT         set to 0 to skip the away-mode entry
+#                                   pre-flight and start the daemon even when the
+#                                   supervisor composer cannot be read (default 1;
+#                                   the refusal message names this override)
+#          FM_AFK_PREFLIGHT_SAMPLES composer samples the pre-flight takes before
+#                                   calling an unreadable composer structural
+#                                   (default 5; see AFK_PREFLIGHT_SAMPLES_DEFAULT
+#                                   for the derivation)
+#          FM_AFK_PREFLIGHT_SLEEP   seconds between those samples (default 1)
+#          FM_COMPOSER_UNREADABLE_SECS seconds an away-mode supervisor composer
+#                                   may stay unreadable while IDLE before the
+#                                   readiness alarm fires, with no escalation
+#                                   needed to trigger it (default: MAX_DEFER_SECS;
+#                                   0 disables)
 #          FM_WEDGE_ALARM_CHANNEL   override config/wedge-alarm with a single
 #                                   active-alert directive for that wedge alarm
 #                                   (off|auto|osascript|herdr|command:<cmd>). An
@@ -198,6 +212,37 @@ HOUSEKEEPING_TICK_DEFAULT=15
 # the normal flush path and, if that cannot confirm a submit, raises a loud wedge
 # alarm. The escape hatch makes a guard false-positive visible instead of silent.
 MAX_DEFER_SECS_DEFAULT=300
+# Away-mode entry pre-flight (task fm-afk-composer-wedge). Away mode is the one
+# mode with nobody in the room, so an injector that can never confirm a target
+# is a silent outage: the incident that added this deferred a review-ready PR
+# for 3h16m while the max-defer alarm escalated by logging louder. The captain
+# IS present at entry, so proving the composer readable there converts that
+# outage into an immediate refusal.
+#
+# Threshold derivation. A structural misread never recovers - the incident read
+# `unknown` on 819 of 819 samples over 3h16m - while a transient unreadable
+# capture is bounded by one terminal repaint plus the adapter's settle, well
+# under a second. Five samples spaced a second apart span ~4s, more than an
+# order of magnitude above a repaint, so an `unknown` that survives all five is
+# structural rather than timing. Four seconds is negligible at entry, which the
+# captain is waiting on.
+AFK_PREFLIGHT_SAMPLES_DEFAULT=5
+AFK_PREFLIGHT_SLEEP_SECS_DEFAULT=1
+# The pre-flight alone is not enough. On the documented claude path the daemon
+# is launched by the captain's own in-pane background tool, so at entry the
+# agent is still MID-TURN: the pane reads `busy`, which is readable but proves
+# nothing about the composer that appears when the turn ends. That is exactly
+# how the incident began. So away mode also watches composer READINESS for as
+# long as it is active, and alarms on a composer that stays unreadable while
+# idle even when NOTHING is buffered yet - the gap the max-defer alarm cannot
+# cover, because it only fires once an escalation is already stuck.
+#
+# Threshold derivation: housekeeping runs every HOUSEKEEPING_TICK (15s), so a
+# transient unreadable capture clears within a poll or two. This reuses
+# MAX_DEFER_SECS (300s) rather than inventing a second number, because that is
+# already the fleet's established "no longer transient" boundary for delivery;
+# 300s is ~20 consecutive idle observations, which no redraw survives.
+COMPOSER_UNREADABLE_SECS_DEFAULT=$MAX_DEFER_SECS_DEFAULT
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
@@ -656,6 +701,47 @@ escalate_flush() {  # <state>
   return 1
 }
 
+# --- away-mode entry pre-flight --------------------------------------------
+# afk_preflight_composer: prove the supervisor composer is CLASSIFIABLE before
+# away mode starts relying on it. Prints the deciding verdict; returns 0 when
+# the pane was readable at least once, 1 when every sample was `unknown`.
+#
+# It asks exactly the questions inject_msg asks, in inject_msg's order, so the
+# pre-flight cannot pass a pane the injector would then refuse: a busy pane is a
+# READABLE pane (the agent is mid-turn, which is the normal state at entry,
+# since the captain just submitted the command that started the daemon), and any
+# concrete composer verdict - `empty`, `pending`, `pending-unproven` - means the
+# shape was recognised. Only `unknown` is the permanent-deferral state, because
+# it is the one verdict no amount of waiting resolves.
+#
+# This deliberately does NOT require `empty`. A captain who leaves a half-typed
+# line in the composer is a normal, self-clearing condition; refusing entry for
+# it would be a false alarm.
+afk_preflight_composer() {  # <backend> <target> -> verdict on stdout
+  local backend=$1 target=$2 samples sleep_s i=0 verdict=
+  samples=${FM_AFK_PREFLIGHT_SAMPLES:-$AFK_PREFLIGHT_SAMPLES_DEFAULT}
+  case "$samples" in ''|*[!0-9]*|0) samples=$AFK_PREFLIGHT_SAMPLES_DEFAULT ;; esac
+  sleep_s=${FM_AFK_PREFLIGHT_SLEEP:-$AFK_PREFLIGHT_SLEEP_SECS_DEFAULT}
+  case "$sleep_s" in ''|*[!0-9.]*) sleep_s=$AFK_PREFLIGHT_SLEEP_SECS_DEFAULT ;; esac
+  while [ "$i" -lt "$samples" ]; do
+    if pane_is_busy "$target" "$backend"; then
+      printf 'busy'
+      return 0
+    fi
+    verdict=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
+    case "$verdict" in
+      empty|pending|pending-unproven)
+        printf '%s' "$verdict"
+        return 0
+        ;;
+    esac
+    i=$((i + 1))
+    [ "$i" -lt "$samples" ] && sleep "$sleep_s"
+  done
+  printf '%s' "${verdict:-unknown}"
+  return 1
+}
+
 # --- backend-independent active wedge alert ---------------------------------
 # The tmux status-line flash in inject_wedge_alarm below is a cosmetic,
 # client-side OSD with no cross-backend equivalent, so a wedged non-tmux primary
@@ -944,6 +1030,63 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
   fi
 }
 
+# composer_readiness_watch: while away mode is active, keep proving the
+# supervisor composer is READABLE, and alarm when it is not - with or without
+# anything buffered.
+#
+# This is the half the max-defer alarm structurally cannot do. That alarm keys
+# off an escalation that is already stuck, so the captain is warned only after
+# an event they needed has been swallowed; and it says "undelivered", which
+# reads as a busy pane rather than a classifier that will never succeed. This
+# watch keys off the pane instead, so a composer that goes unreadable during an
+# away stretch is reported BEFORE the first escalation is lost.
+#
+# A busy pane is skipped rather than counted: mid-turn is not evidence about the
+# idle composer either way. Only an IDLE pane whose composer classifies
+# `unknown` accumulates, so the timer measures continuous provable unreadability.
+composer_readiness_watch() {  # <state>
+  local state=$1
+  local marker="$state/.subsuper-composer-unreadable"
+  local limit target backend verdict age now
+  limit=${FM_COMPOSER_UNREADABLE_SECS:-$COMPOSER_UNREADABLE_SECS_DEFAULT}
+  case "$limit" in ''|*[!0-9]*) limit=$COMPOSER_UNREADABLE_SECS_DEFAULT ;; esac
+  [ "$limit" -gt 0 ] || return 0
+  afk_active "$state" || { rm -f "$marker" 2>/dev/null || true; return 0; }
+  target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
+  backend="${FM_SUPERVISOR_BACKEND:-$FM_SUPERVISOR_BACKEND_DEFAULT}"
+  # Mid-turn says nothing about the composer that appears when the turn ends.
+  ! pane_is_busy "$target" "$backend" || return 0
+  verdict=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
+  # Positive allowlist, matching afk_preflight_composer and pane_input_pending:
+  # only a concrete verdict proves the shape was recognised. `unknown`, a future
+  # verdict, and an empty string (a dispatch that failed outright) all mean the
+  # composer could not be read, which is the condition being watched.
+  case "$verdict" in
+    empty|pending|pending-unproven)
+      if [ -e "$marker" ]; then
+        log "away-mode composer readable again (state=$verdict); clearing the unreadable-composer alarm"
+        rm -f "$marker" 2>/dev/null || true
+      fi
+      return 0
+      ;;
+  esac
+  if [ ! -e "$marker" ]; then
+    printf '%s\n' "$(_now)" > "$marker" 2>/dev/null || true
+    return 0
+  fi
+  age=$(( $(_now) - $(head -1 "$marker" 2>/dev/null || echo 0) ))
+  [ "$age" -ge "$limit" ] || return 0
+  # Rate-limit to one alarm per window, reusing the delivery alarm's clock so a
+  # wedged pane cannot produce two notification streams.
+  now=$(_now)
+  if [ "$WEDGE_ALARM_LAST_EPOCH" -gt 0 ] && [ $((now - WEDGE_ALARM_LAST_EPOCH)) -lt "$limit" ]; then
+    return 0
+  fi
+  WEDGE_ALARM_LAST_EPOCH=$now
+  log "ERROR: away-mode supervisor composer has been UNREADABLE (state=${verdict:-no-verdict}) while idle for ${age}s (backend=$backend target=$target). No escalation can be delivered while this lasts; end away mode and check the pane."
+  wedge_alarm_notify "away-mode supervisor composer unreadable ${age}s - escalations cannot be delivered" "$marker"
+}
+
 # --- housekeeping (runs every tick while the watcher is mid-cycle) ----------
 # Four cheap jobs, each guarded so an empty/quiet fleet costs near zero:
 #  1) batch flush: if the escalation buffer's oldest content is older than
@@ -951,6 +1094,9 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  1b) max-defer escape: if the buffer is STILL undelivered past MAX_DEFER_SECS,
 #     attempt one normal delivery; if it cannot confirm, raise the wedge alarm.
 #     Never silently defer forever.
+#  1c) composer readiness: while away, alarm on a supervisor composer that stays
+#     unreadable while IDLE past COMPOSER_UNREADABLE_SECS, even with an empty
+#     buffer - the max-defer alarm only fires once something is already stuck.
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
 #  2b) pause re-surface: for each declared-pause marker past PAUSE_RESURFACE_SECS,
@@ -992,6 +1138,10 @@ housekeeping() {  # <state>
       fi
     fi
   fi
+
+  # (1c) away-mode composer readiness. Independent of the buffer above, so an
+  # unreadable composer is reported before it swallows the first escalation.
+  composer_readiness_watch "$state"
 
   # (2) stale persistence recheck
   for marker in "$state"/.subsuper-stale-*; do
@@ -1444,6 +1594,42 @@ fm_super_main() {
   local afk_status="off"
   afk_active "$STATE" && afk_status="on"
   log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
+  # --- away-mode entry pre-flight (task fm-afk-composer-wedge) --------------
+  # Away mode delegates every captain-facing escalation to a composer this
+  # daemon must be able to read. When it cannot, the injector defers forever and
+  # the captain learns only on return. Refuse HERE instead, while the captain is
+  # still at the keyboard: an away mode that cannot deliver is worse than none,
+  # because it creates false confidence. Ordinary (afk off) supervision does not
+  # inject, so it only records the verdict and continues.
+  if [ "$afk_status" = on ]; then
+    local preflight
+    if preflight=$(afk_preflight_composer "$BACKEND" "$TARGET"); then
+      if [ "$preflight" = busy ]; then
+        # Mid-turn is the NORMAL state at entry on the claude path, where the
+        # captain's own in-pane background tool launches this daemon. It proves
+        # the pane exists, not that its idle composer can be read, so the verdict
+        # is deferred to composer_readiness_watch rather than claimed here.
+        log "away-mode preflight: supervisor pane busy (agent mid-turn); composer readability deferred to the readiness watch"
+      else
+        log "away-mode preflight: supervisor composer readable (state=$preflight)"
+      fi
+    elif [ "${FM_AFK_PREFLIGHT:-1}" = 0 ]; then
+      log "away-mode preflight: composer unreadable (state=$preflight) but FM_AFK_PREFLIGHT=0; starting anyway"
+    else
+      log "away-mode preflight FAILED: composer unreadable (state=$preflight) on backend=$BACKEND target=$TARGET; refusing to enter away mode"
+      echo "error: away mode refused - the supervisor composer at '$TARGET' (backend $BACKEND) could not be classified." >&2
+      echo "       Every escalation would be deferred indefinitely and you would not hear about it until you returned." >&2
+      echo "       Check that '$TARGET' is firstmate's own pane and that its agent is at a normal prompt," >&2
+      echo "       then re-enter away mode. To start anyway, re-run with FM_AFK_PREFLIGHT=0." >&2
+      # A refused daemon must not leave away mode armed: firstmate would believe
+      # a daemon owns supervision while nothing does.
+      rm -f "$STATE/.afk" 2>/dev/null || true
+      fm_lock_release "$LOCK" 2>/dev/null || true
+      rm -f "$PIDFILE" 2>/dev/null || true
+      exit 1
+    fi
+  fi
+
   migrate_watcher_pause_markers "$STATE"
 
   # --- shutdown: flush buffered escalations, reap child, release lock -------
