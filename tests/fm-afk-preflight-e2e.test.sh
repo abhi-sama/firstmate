@@ -221,6 +221,10 @@ readiness_env() {
   FM_COMPOSER_UNREADABLE_SECS=300
   FM_WEDGE_ALARM_EXEC="$TMP_ROOT/notify.sh"
   export FM_SUPERVISOR_TARGET FM_SUPERVISOR_BACKEND FM_COMPOSER_UNREADABLE_SECS FM_WEDGE_ALARM_EXEC
+  # The sourced daemon's alarm rate-limit clock. Reset per case so one case's
+  # alarm cannot suppress the next one's. ShellCheck cannot see the use because
+  # the daemon that reads it is sourced, not declared here.
+  # shellcheck disable=SC2034
   WEDGE_ALARM_LAST_EPOCH=0
   cat > "$TMP_ROOT/notify.sh" <<'NOTIFY'
 #!/usr/bin/env bash
