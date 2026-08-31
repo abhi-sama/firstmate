@@ -321,18 +321,25 @@ busy_turn_over_age() {  # <task>
   [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
 }
 
-# Absorb a stale pane under a declared external-wait pause (paused:) or a
-# dead-agent captain-held transfer, and re-surface it once every
-# PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
-# stale poll once pause_state_class permits the bounded cadence, so it must be
-# cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
-# status file mtime, not a per-hash marker, so a churny idle pane (a ticking
-# clock, a token counter) cannot keep resetting the cadence the way a hash-tied
-# timer would. A .paused-resurfaced-<key> throttle marker records the last
+# Absorb a stale pane that is waiting on a bounded external event rather than
+# possibly wedged, and re-surface it once every PAUSE_RESURFACE_SECS for a
+# recheck so it cannot rot invisibly. <kind> selects which wait this is, and
+# only the wake wording differs: `paused` (the default) is a declared
+# external-wait pause or a dead-agent captain-held transfer, and
+# `awaiting-landing` is the derived finished-with-an-open-PR state
+# (task_awaits_pr_landing in bin/fm-classify-lib.sh). Both share this cadence,
+# its .paused-<key> markers and its status-mtime anchor, so a finished task's
+# idle pane cannot be re-alarmed by pane churn and cannot go quiet forever
+# either. Called on any stale poll that has already established the bounded
+# cadence applies - pause_state_class for a declared pause, task_awaits_pr_landing
+# for an open PR - so it must be cheap: it NEVER re-reads crew state. The
+# re-surface age is anchored on the status file mtime, not a per-hash marker, so
+# a churny idle pane (a ticking clock, a token counter) cannot keep resetting the
+# cadence the way a hash-tied timer would. A .paused-resurfaced-<key> throttle marker records the last
 # re-surface epoch so, once past the window, it fires once per window rather than
 # every poll. Advances the stale suppressor to <hash> and flags the key paused.
-handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
+handle_paused_stale() {  # <window> <task> <hash> [<kind: paused|awaiting-landing>]
+  local win=$1 task=$2 h=$3 kind=${4:-paused} key statusf mtime age rf rf_age reason word detail
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
@@ -343,13 +350,21 @@ handle_paused_stale() {  # <window> <task> <hash>
   age=$(( $(date +%s) - mtime ))
   rf="$STATE/.paused-resurfaced-$key"
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
+  case "$kind" in
+    awaiting-landing)
+      word='awaiting review'
+      detail='work finished and its PR merge poll is armed, rechecked on a long cadence not a wedge; confirm the PR is still open' ;;
+    *)
+      word=paused
+      detail='awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds' ;;
+  esac
   if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
-    reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
+    reason="stale: $win ($word ${age}s, $detail)"
     fm_wake_append stale "$win" "$reason" || exit 1
     date +%s > "$rf"
     wake "$reason"
   fi
-  triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
+  triage_log "absorbed stale ($kind, age ${age}s): $win"
 }
 
 clear_pause_state() {  # <window>
@@ -1009,7 +1024,9 @@ EOF
     key=${key//\//_}
     key=${key//./_}
     last=$(last_status_line "$STATE/$task.status")
-    if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
+    if ! status_is_paused_or_captain_held "$last" \
+      && ! task_awaits_pr_landing "$task" "$STATE" "$last" \
+      && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
     fi
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
@@ -1049,6 +1066,16 @@ EOF
             printf '%s' "$h" > "$sf"
             wake "stale: $w"
           fi
+        elif task_awaits_pr_landing "$task" "$STATE"; then
+          # Finished, PR open, merge poll armed: the task is waiting on review,
+          # not stuck, and the poll is the registered waker that will surface
+          # the merge. Staleness of its pane adds nothing, and because the
+          # suppressor is keyed on a PANE HASH this branch is what stops one
+          # finished task alarming again on every redraw. Absorbed on the same
+          # bounded cadence a declared pause uses, so it still re-surfaces once
+          # per window and the moment the PR lands (poll retired) it drops back
+          # to ordinary staleness triage.
+          handle_paused_stale "$w" "$task" "$h" awaiting-landing
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's last line is captain-relevant - but that alone is not
           # proof the crew is actually done: a crew's own status log gets no

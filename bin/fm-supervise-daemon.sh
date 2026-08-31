@@ -426,6 +426,16 @@ classify_stale() {  # <window> <state>
     printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
     return
   fi
+  if task_awaits_pr_landing "$task" "$state"; then
+    # The DERIVED equivalent (task_awaits_pr_landing in fm-classify-lib.sh): the
+    # work is finished, the PR is open and its merge poll is armed, so an idle
+    # pane is expected here too and the poll - not this pane - is what reports
+    # the landing. Same bounded recheck cadence as a declared pause, so away mode
+    # tells the captain the same story the always-on watcher does instead of
+    # escalating a finished task as a possible wedge.
+    printf 'pause|awaiting review (PR open, merge poll armed), rechecked on a long cadence: %s' "$last"
+    return
+  fi
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
     # Independent of free-text captain-relevant matching: a nonterminal progress
     # verb (working:) must never take the terminal stale path. Seen-status dedupe
@@ -525,7 +535,7 @@ reconcile_pause_tracking() {  # <window> <state> <last-status-line>
   key=$(_stale_key "$task")
   marker="$state/.subsuper-paused-$key"
   watcher_key=$(_stale_key "$win")
-  if status_is_paused "$last"; then
+  if task_wait_is_expected "$task" "$state" "$last"; then
     stale_marker_remove "$win" "$state"
     pause_marker_record "$win" "$state"
   elif [ -e "$marker" ] || [ -e "$state/.paused-$watcher_key" ]; then
@@ -1187,7 +1197,7 @@ housekeeping() {  # <state>
     fi
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
-    if [ -z "$last" ] || ! status_is_paused "$last"; then
+    if ! task_wait_is_expected "$task" "$state" "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
@@ -1199,8 +1209,11 @@ housekeeping() {  # <state>
       2) rm -f "$marker" ;;
       *)
         last=$(last_status_line "$state/$task.status")
-        if [ -n "$last" ] && status_is_paused "$last"; then
+        if status_is_paused "$last"; then
           escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
+          _now > "$marker"
+        elif task_awaits_pr_landing "$task" "$state"; then
+          escalate_add "$state" "awaiting review ${age}s (PR open with its merge poll armed, confirm the PR is still open): $win"
           _now > "$marker"
         else
           rm -f "$marker"

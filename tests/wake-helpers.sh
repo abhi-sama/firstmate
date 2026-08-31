@@ -110,6 +110,25 @@ SH
   printf '%s\n' "$fakebin/fm-crew-state.sh"
 }
 
+# Arm a task's canonical PR merge poll exactly as bin/fm-pr-check.sh does, through
+# the real bin/fm-pr-lib.sh interface rather than by hand-writing its artifacts, so
+# a fixture cannot drift from the poll the watcher actually validates and retires.
+# Publishes <state>/<id>.pr-poll, <id>.check.sh and <id>.pr-poll-registration - the
+# three files task_awaits_pr_landing reads and the merged-PR retirement removes.
+arm_pr_poll() {  # <state> <task-id> [<pr-url>] [<number>]
+  local state=$1 id=$2 url=${3:-https://github.com/o/r/pull/7} number=${4:-7}
+  # The poll binds to the canonical pr= line in the task's own metadata, so the
+  # fixture records it first exactly as bin/fm-pr-check.sh does.
+  [ -f "$state/$id.meta" ] || printf 'window=test:fm-%s\nkind=ship\n' "$id" > "$state/$id.meta"
+  grep -q '^pr=' "$state/$id.meta" || printf 'pr=%s\n' "$url" >> "$state/$id.meta"
+  ( # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-pr-lib.sh"
+    fm_pr_poll_prepare "$state" "$id" github "$url" github.com o/r "$number" \
+      "$ROOT/bin/fm-pr-poll.sh" || exit 1
+    fm_pr_poll_publish_prepared || exit 1
+  )
+}
+
 make_supercase() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"

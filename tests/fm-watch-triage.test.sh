@@ -528,6 +528,217 @@ test_stale_terminal_status_overridden_by_active_run() {
   pass "a stale terminal-looking status is overridden and absorbed while a run is actively working, then wedge-escalated"
 }
 
+# --- finished and awaiting review: quiet across pane churn, but bounded -------
+# The 2026-08-30/31 case: a ship task in the perfectly ordinary state "work done,
+# PR open, waiting for review" had NO representation the staleness triage treated
+# as healthy. Its worker is idle because there is nothing left to do, but the
+# suppressor is keyed on a PANE HASH, so every redraw of that idle pane counted as
+# a fresh stale sighting and re-surfaced the same finished task - four times on one
+# task in a single night, each costing a full handling turn. Exiting the agent,
+# killing the window, or tearing the task down all alarmed too (the last correctly
+# refusing to discard the unlanded PR).
+#
+# task_awaits_pr_landing derives the missing state from evidence that already
+# exists and is already maintained: a terminal done: line plus the merge poll
+# bin/fm-pr-check.sh armed. Nothing new has to be remembered or cleared.
+
+# Drive one watcher cycle over a FRESH pane hash and print SURFACED or ABSORBED
+# for that window's staleness. Every cycle is drained and acknowledged, exactly as
+# firstmate's own handling turn would leave it, so the next cycle starts clean.
+# Repeatedly starting and stopping a watcher is itself downtime, and the recovery
+# resurface ("check: rearm-resurface") can end a cycle before its stale triage
+# runs; that is not a verdict about this window, so the cycle is retried.
+awaiting_cycle() {  # <dir> <state> <fakebin> <window> <pane-text>
+  local dir=$1 state=$2 fakebin=$3 window=$4 text=$5 key out h pid _attempt
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  out="$dir/watch.out"
+  printf '%s' "$text" > "$dir/pane.txt"
+  h=$(hash_text "$text")
+  for _attempt in 1 2 3; do
+    printf '%s' "$h" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    if wait_live "$pid" 30; then
+      reap "$pid"
+      ack_stopped_cycle "$state" >/dev/null 2>&1 || true
+      printf 'ABSORBED'
+      return 0
+    fi
+    wait "$pid" 2>/dev/null || true
+    ack_stopped_cycle "$state" >/dev/null 2>&1 || true
+    if grep -F "stale: $window" "$out" >/dev/null 2>&1; then
+      printf 'SURFACED'
+      return 0
+    fi
+    grep -qxF 'check: rearm-resurface' "$out" || break
+  done
+  printf 'OTHER'
+}
+
+test_awaits_pr_landing_classifier() {
+  local dir state
+  dir=$(make_case classify-awaits-landing); state="$dir/state"
+  printf 'window=%s\nkind=ship\n' 'test:fm-t' > "$state/t.meta"
+  printf 'done: PR https://github.com/o/r/pull/7 checks green\n' > "$state/t.status"
+
+  task_awaits_pr_landing t "$state" && fail "a done: task with no armed merge poll was treated as awaiting review"
+  arm_pr_poll "$state" t || fail "could not arm the canonical merge poll fixture"
+  task_awaits_pr_landing t "$state" || fail "a done: task with an armed merge poll was not treated as awaiting review"
+
+  # Unfinished work still needs the captain and must never reach the quiet state,
+  # however its PR poll stands.
+  local verb
+  for verb in blocked needs-decision failed working resolved captain-held; do
+    printf '%s: something\n' "$verb" > "$state/t.status"
+    task_awaits_pr_landing t "$state" \
+      && fail "a '$verb:' task with an armed merge poll was wrongly treated as awaiting review"
+  done
+  printf 'done: PR https://github.com/o/r/pull/7 checks green\nworking: reworking after review\n' > "$state/t.status"
+  task_awaits_pr_landing t "$state" && fail "a crew that picked the task back up stayed in the quiet state"
+
+  # Once the PR lands, the merged-PR retirement removes the poll artifacts
+  # together; losing either one must leave the quiet state.
+  printf 'done: PR https://github.com/o/r/pull/7 checks green\n' > "$state/t.status"
+  mv "$state/t.check.sh" "$state/t.check.sh.away"
+  task_awaits_pr_landing t "$state" && fail "the quiet state survived a retired poll check"
+  mv "$state/t.check.sh.away" "$state/t.check.sh"
+  mv "$state/t.pr-poll-registration" "$state/t.reg.away"
+  task_awaits_pr_landing t "$state" && fail "the quiet state survived a retired poll registration"
+  ln -s "$state/t.reg.away" "$state/t.pr-poll-registration"
+  task_awaits_pr_landing t "$state" && fail "a symlinked poll artifact was accepted as an armed poll"
+  rm -f "$state/t.pr-poll-registration"
+  mv "$state/t.reg.away" "$state/t.pr-poll-registration"
+  task_awaits_pr_landing t "$state" || fail "a restored armed poll did not re-enter the quiet state"
+
+  # task_wait_is_expected covers both reasons an idle pane is legitimate.
+  task_wait_is_expected t "$state" "done: PR https://github.com/o/r/pull/7 checks green" \
+    || fail "task_wait_is_expected missed the derived awaiting-review wait"
+  task_wait_is_expected t "$state" "paused: upstream release" \
+    || fail "task_wait_is_expected missed a declared pause"
+  printf 'blocked: need a credential\n' > "$state/t.status"
+  task_wait_is_expected t "$state" "blocked: need a credential" \
+    && fail "task_wait_is_expected treated a blocked task as an expected wait"
+  pass "task_awaits_pr_landing is true only for a done: task whose merge poll is armed by regular files"
+}
+
+test_awaiting_pr_landing_absorbed_across_pane_churn() {
+  local dir state fakebin window key statusf sig verdict n back drain_out
+  dir=$(make_case awaiting-review-churn); state="$dir/state"; fakebin="$dir/fakebin"
+  drain_out="$dir/drain.out"
+  window="test:fm-awaiting"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  statusf="$state/awaiting.status"
+  printf 'window=%s\nkind=ship\nmode=direct-PR\n' "$window" > "$state/awaiting.meta"
+  printf 'working: implementing\ndone: PR https://github.com/o/r/pull/7 checks green\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-awaiting_status"
+  : > "$state/.hb-surfaced-awaiting"
+  arm_pr_poll "$state" awaiting || fail "could not arm the canonical merge poll fixture"
+  # The worker finished; it is NOT provably working, which is exactly why the
+  # ordinary triage had nothing left that could keep it quiet.
+  export FM_FAKE_CREW_STATE='state: stopped · source: pane · agent exited'
+
+  # Criterion 2: a fresh pane hash every cycle is what used to re-alarm; all of
+  # them must now be absorbed.
+  for n in 1 2 3 4; do
+    verdict=$(awaiting_cycle "$dir" "$state" "$fakebin" "$window" "idle pane redraw $n")
+    [ "$verdict" = ABSORBED ] || fail "cycle $n re-alarmed a finished task awaiting review: $(cat "$dir/watch.out")"
+  done
+  [ ! -s "$state/.wake-queue" ] || fail "awaiting-review absorbs enqueued a wake"
+  [ -e "$state/.paused-$key" ] || fail "the bounded-cadence flag was not recorded for an awaiting-review absorb"
+  [ ! -e "$state/.stale-since-$key" ] || fail "an awaiting-review absorb must not start the wedge timer"
+  [ ! -e "$state/.hb-surfaced-awaiting" ] || rm -f "$state/.hb-surfaced-awaiting"
+
+  # Still bounded: past the recheck window it re-surfaces ONCE for a confirmation,
+  # so a poll that never retires (a PR closed unmerged) cannot rot invisibly.
+  back=$(( $(date +%s) - 5000 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-awaiting_status"
+  : > "$dir/watch.out"
+  printf 'idle pane redraw 5' > "$dir/pane.txt"
+  printf '%s' "$(hash_text 'idle pane redraw 5')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" &
+  local pid=$!
+  wait_for_exit "$pid" 40 || fail "an awaiting-review task never re-surfaced for its bounded recheck"
+  grep -F "awaiting review" "$dir/watch.out" >/dev/null || fail "the recheck was not labeled an awaiting-review wait"
+  grep -F "possible wedge" "$dir/watch.out" >/dev/null && fail "an awaiting-review recheck was mislabeled a possible wedge"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the recheck throttle marker was not recorded"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the awaiting-review recheck failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the awaiting-review recheck was not queued"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the awaiting-review recheck stop"
+  unset FM_FAKE_CREW_STATE
+  pass "a finished task with an open PR stays quiet across pane churn and still re-surfaces once per recheck window"
+}
+
+test_awaiting_pr_landing_does_not_silence_a_wedge() {
+  local dir state fakebin window statusf sig verdict
+  dir=$(make_case awaiting-review-wedge); state="$dir/state"; fakebin="$dir/fakebin"
+  window="test:fm-wedged"
+  statusf="$state/wedged.status"
+  printf 'window=%s\nkind=ship\nmode=direct-PR\n' "$window" > "$state/wedged.meta"
+  arm_pr_poll "$state" wedged || fail "could not arm the canonical merge poll fixture"
+  export FM_FAKE_CREW_STATE='state: stopped · source: pane · agent exited'
+
+  # Criterion 3: an armed merge poll alone must silence nothing. A worker that
+  # opened its PR and then wedged mid-follow-up has no terminal done: line, and
+  # must still alarm on the first quiet sighting, exactly as it does today.
+  printf 'working: addressing review comments\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-wedged_status"
+  verdict=$(awaiting_cycle "$dir" "$state" "$fakebin" "$window" 'wedged mid follow-up')
+  [ "$verdict" = SURFACED ] || fail "a wedged worker with an open PR was silenced by the awaiting-review state"
+
+  # A finished task whose PR-ready step has NOT been taken has no registered
+  # waker, so it must still surface - that first wake is what prompts it.
+  local dir2 state2 fakebin2
+  dir2=$(make_case awaiting-review-unarmed); state2="$dir2/state"; fakebin2="$dir2/fakebin"
+  printf 'window=%s\nkind=ship\n' "test:fm-unarmed" > "$state2/unarmed.meta"
+  printf 'done: PR https://github.com/o/r/pull/9 checks green\n' > "$state2/unarmed.status"
+  sig=$(seen_sig "$state2/unarmed.status"); printf '%s' "$sig" > "$state2/.seen-unarmed_status"
+  verdict=$(awaiting_cycle "$dir2" "$state2" "$fakebin2" "test:fm-unarmed" 'finished, no poll armed')
+  [ "$verdict" = SURFACED ] || fail "a finished task with no armed merge poll was silenced"
+  unset FM_FAKE_CREW_STATE
+  pass "an armed merge poll alone silences nothing: a wedged worker and an unarmed finished task both still alarm"
+}
+
+test_awaiting_pr_landing_alarms_again_once_the_pr_lands() {
+  local dir state fakebin window statusf sig verdict n
+  dir=$(make_case awaiting-review-landed); state="$dir/state"; fakebin="$dir/fakebin"
+  window="test:fm-landed"
+  statusf="$state/landed.status"
+  printf 'window=%s\nkind=ship\nmode=direct-PR\n' "$window" > "$state/landed.meta"
+  printf 'done: PR https://github.com/o/r/pull/7 checks green\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-landed_status"
+  : > "$state/.hb-surfaced-landed"
+  arm_pr_poll "$state" landed || fail "could not arm the canonical merge poll fixture"
+  export FM_FAKE_CREW_STATE='state: stopped · source: pane · agent exited'
+
+  verdict=$(awaiting_cycle "$dir" "$state" "$fakebin" "$window" 'idle, PR open')
+  [ "$verdict" = ABSORBED ] || fail "an open PR did not reach the quiet state"
+
+  # Criterion 4: the merged-PR retirement removes the poll's check, data and
+  # registration together. The agent here never exits, so the very same idle pane
+  # must alarm again the moment its waker is gone - the quiet state is bounded by
+  # the wait it was derived from, not by anything anyone has to clear by hand.
+  rm -f "$state/landed.check.sh" "$state/landed.pr-poll" "$state/landed.pr-poll-registration"
+  for n in 1 2; do
+    verdict=$(awaiting_cycle "$dir" "$state" "$fakebin" "$window" "idle, PR merged $n")
+    [ "$verdict" = SURFACED ] || fail "a task that wedged after its PR landed stayed permanently silenced (cycle $n)"
+  done
+  unset FM_FAKE_CREW_STATE
+  pass "a task that finishes and then wedges with its PR already landed is not permanently silenced"
+}
+
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
 # A provably-working crew (an actively-running pipeline) legitimately sits on a
 # static pane (e.g. waiting on CI), so a non-terminal stale is absorbed and only
@@ -1861,6 +2072,10 @@ test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
+test_awaits_pr_landing_classifier
+test_awaiting_pr_landing_absorbed_across_pane_churn
+test_awaiting_pr_landing_does_not_silence_a_wedge
+test_awaiting_pr_landing_alarms_again_once_the_pr_lands
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed

@@ -220,6 +220,41 @@ test_stale_paused_classifies_pause() {
   pass "paused reasons with captain phrases remain pause-classified"
 }
 
+# A finished ship task whose PR is still open is the DERIVED equivalent of a
+# declared pause: its idle pane is expected, and the armed merge poll - not the
+# pane - is what reports the landing. Away mode must tell the captain the same
+# story the always-on watcher does, so classify_stale returns the `pause` action
+# and housekeeping rechecks it on the long cadence instead of escalating a
+# finished task as a possible wedge. The moment the PR lands and the poll retires,
+# it reverts to the ordinary terminal escalation.
+test_stale_awaiting_pr_landing_classifies_pause() {
+  local dir state out
+  dir=$(make_supercase stale-awaiting-landing)
+  state="$dir/state"
+  printf 'done: PR https://github.com/o/r/pull/7 checks green\n' > "$state/await-w11.status"
+
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-await-w11" "$state")
+  case "$out" in escalate\|*) ;; *) fail "a finished task with no armed merge poll did not escalate: $out" ;; esac
+
+  arm_pr_poll "$state" await-w11 || fail "could not arm the canonical merge poll fixture"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-await-w11" "$state")
+  case "$out" in pause\|*) ;; *) fail "an open PR awaiting review did not classify as a bounded wait: $out" ;; esac
+  case "$out" in *"awaiting review"*) ;; *) fail "the awaiting-review wait was not named in the digest reason: $out" ;; esac
+
+  # Unfinished work still needs the captain, whatever its PR is doing.
+  printf 'blocked: need a credential\n' > "$state/await-w11.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-await-w11" "$state")
+  case "$out" in escalate\|*) ;; *) fail "a blocked task with an armed merge poll was quietened: $out" ;; esac
+
+  # Once the merged-PR retirement removes the poll, the finished task escalates
+  # again, so an agent that never exits cannot be silenced forever.
+  printf 'done: PR https://github.com/o/r/pull/7 checks green\n' > "$state/await-w11.status"
+  rm -f "$state/await-w11.check.sh" "$state/await-w11.pr-poll" "$state/await-w11.pr-poll-registration"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-await-w11" "$state")
+  case "$out" in escalate\|*) ;; *) fail "a landed PR did not return the task to ordinary escalation: $out" ;; esac
+  pass "away mode treats a finished task with an open PR as a bounded wait, and escalates again once it lands"
+}
+
 # handle_wake on a paused stale records a pause marker, drops any pre-existing wedge
 # marker (so a working->paused pane is not still wedge-aged), and does NOT escalate
 # on the wake itself - the recheck is housekeeping's job on the long cadence.
@@ -347,6 +382,48 @@ test_housekeeping_paused_resurfaces_and_resets() {
   age=$(( $(date +%s) - $(cat "$state/.subsuper-paused-$key" 2>/dev/null || echo 0) ))
   [ "$age" -lt 60 ] || fail "pause marker was not reset to now on re-surface (age ${age}s)"
   pass "housekeeping re-surfaces a stale declared pause on the long cadence and resets its window"
+}
+
+# The derived awaiting-review wait uses the SAME housekeeping recheck as a declared
+# pause, so away mode gains exactly one batched recheck line per unmerged task per
+# FM_PAUSE_RESURFACE_SECS window and nothing more. It also proves the wait cannot
+# rot: an open PR that is never merged keeps being rechecked rather than going
+# permanently silent, and once the merge poll retires the marker is dropped.
+test_housekeeping_awaiting_pr_landing_resurfaces_and_resets() {
+  local dir state fakebin win pane key age
+  dir=$(make_supercase awaiting-landing-resurface)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-await-w13"; pane="$dir/pane.txt"
+  printf 'done: PR https://github.com/o/r/pull/7 checks green\n' > "$state/await-w13.status"
+  printf 'idle prompt $\n' > "$pane"
+  arm_pr_poll "$state" await-w13 || fail "could not arm the canonical merge poll fixture"
+  key=$(printf '%s' "await-w13" | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  grep -F "awaiting review" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "an open PR awaiting review was not re-surfaced as a recheck"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    && fail "an awaiting-review recheck was mislabeled a possible wedge"
+  [ -e "$state/.subsuper-paused-$key" ] || fail "the recheck marker was cleared instead of reset for the next window"
+  age=$(( $(date +%s) - $(cat "$state/.subsuper-paused-$key" 2>/dev/null || echo 0) ))
+  [ "$age" -lt 60 ] || fail "the recheck marker was not reset to now (age ${age}s)"
+
+  # Inside the window it stays silent: exactly one line per window, not per poll.
+  : > "$state/.subsuper-escalations"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "the awaiting-review recheck fired twice inside one window"
+
+  # Once the PR lands and the merge poll retires, tracking is dropped and the
+  # task returns to the ordinary paths.
+  rm -f "$state/await-w13.check.sh" "$state/await-w13.pr-poll" "$state/await-w13.pr-poll-registration"
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  [ -e "$state/.subsuper-paused-$key" ] && fail "a landed PR kept its bounded-wait tracking"
+  pass "away mode rechecks an unmerged PR once per window and drops the wait once it lands"
 }
 
 # A pause whose pane became busy again (the crew resumed) drops its marker without
@@ -1843,6 +1920,7 @@ test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
+test_stale_awaiting_pr_landing_classifies_pause
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
@@ -1852,6 +1930,7 @@ test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
+test_housekeeping_awaiting_pr_landing_resurfaces_and_resets
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_paused_unpaused_cleared
 test_housekeeping_stale_marker_transitions_to_pause
