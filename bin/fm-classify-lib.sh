@@ -144,6 +144,70 @@ status_is_paused_or_captain_held() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
 }
 
+# --- derived awaiting-landing wait ------------------------------------------
+#
+# A ship task whose implementation is finished and whose PR is still open is
+# waiting on review, not stuck: its last status line is a terminal `done:` and
+# firstmate has already armed the merge poll that will wake it when the PR
+# lands. Before this predicate existed such a task had no representation the
+# staleness triage treated as healthy, so every option alarmed - leaving the
+# finished worker alive, exiting it, killing its window, and tearing the task
+# down were all either a `stale:` wake per pane redraw or a correct teardown
+# refusal on unlanded work. The watcher keys staleness on a PANE HASH, so each
+# redraw of an idle pane re-surfaced the same finished task.
+#
+# DERIVED, never stored. Both halves are artifacts the paths that already own
+# them write and remove on their own: the crew's own `done:` append, and the
+# poll artifacts bin/fm-pr-check.sh publishes and the watcher's merged-PR
+# retirement removes together. Nothing has to remember to set or clear a flag,
+# which is precisely the bookkeeping that gets forgotten when it matters.
+#
+# Deliberately narrow, so it can only quieten a task that is genuinely finished
+# and genuinely has a waker armed:
+#   - `done:` only. blocked:, needs-decision: and failed: are unfinished work
+#     that still needs the captain, and a later working: line means the crew
+#     picked the task back up; all of them keep alarming as before.
+#   - only while the merge poll is ARMED. bin/fm-pr-check.sh publishes
+#     <id>.check.sh and <id>.pr-poll-registration in one transaction, and
+#     fm_pr_poll_retirement_recover_one removes them together once the PR is
+#     merged - so a task that finishes and then wedges with its PR already
+#     landed leaves this state on its own and alarms normally again.
+#   - regular files only, never a symlink, matching the poll artifacts' own
+#     regular-file discipline: anything else is not a poll this home armed, and
+#     the safe direction for an unrecognised state is to keep alarming.
+#
+# Callers absorb on the bounded FM_PAUSE_RESURFACE_SECS cadence rather than
+# silencing, so a poll that never retires - a PR closed without merging, an
+# unarmed or quarantined check - still re-surfaces once per window for a
+# recheck instead of rotting invisibly.
+#
+# Pass the last status line when the caller already read it: the watcher reads it
+# once per window per poll, and re-reading it here would double that cost on the
+# hottest path in the loop.
+task_awaits_pr_landing() {  # <task> <state> [<last-status-line>]
+  local task=$1 state=$2 f last
+  [ -n "$task" ] && [ -n "$state" ] || return 1
+  for f in "$state/$task.check.sh" "$state/$task.pr-poll-registration"; do
+    [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  done
+  if [ "$#" -ge 3 ]; then last=$3; else last=$(last_status_line "$state/$task.status"); fi
+  [ -n "$last" ] || return 1
+  [ "$(status_line_verb "$last")" = "done" ]
+}
+
+# 0 when a task's idle pane is EXPECTED rather than possibly wedged, for either
+# reason a bounded external wait can arise: the crew DECLARED a pause, or the
+# awaiting-PR-landing state above is derivable. Both consumers apply the same
+# bounded re-surface cadence to it, so they share one predicate instead of
+# testing the two reasons separately at every site. Pass the last status line
+# when the caller already read it.
+task_wait_is_expected() {  # <task> <state> [<last-status-line>]
+  local task=$1 state=$2 last
+  if [ "$#" -ge 3 ]; then last=$3; else last=$(last_status_line "$state/$task.status"); fi
+  status_is_paused "$last" && return 0
+  task_awaits_pr_landing "$task" "$state" "$last"
+}
+
 # --- durable keyed decisions ------------------------------------------------
 #
 # The status stream is an append-only EVENT log. Reading it last-event-wins

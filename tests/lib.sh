@@ -34,6 +34,20 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Neutralize the invoking firstmate session's own orchestration environment.
+# A suite may be launched from inside a live session - a crewmate agent, or a
+# session-start worker - and those callers export phase, lock-identity, and
+# timing variables that describe THEIR run, not a test's fixture home. Inherited,
+# they silently rewrite what the scripts under test do: FM_BOOTSTRAP_NETWORK=only
+# makes every fm-bootstrap.sh case skip its whole local half (including the
+# legacy PR-check migration sweep), and a stray FM_TIMING_LOG makes
+# bin/fm-timing-lib.sh write where a case asserts it stays inert. The cases that
+# genuinely drive these set them per invocation, as a command prefix, so clearing
+# the ambient values here cannot take that control away from them.
+unset FM_BOOTSTRAP_NETWORK FM_BOOTSTRAP_NETWORK_LOCK_PID FM_BOOTSTRAP_DETECT_ONLY \
+  FM_BOOTSTRAP_LOCKED FM_BOOTSTRAP_VERBOSE_FACTS FM_SESSION_START_STAGE_FILE \
+  FM_TIMING_LOG FM_TIMING_EPOCH_MS
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

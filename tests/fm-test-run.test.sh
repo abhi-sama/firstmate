@@ -669,6 +669,43 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+# tests/lib.sh must make a suite hermetic against the firstmate session that
+# launched it. A crewmate agent or a session-start worker exports its own
+# bootstrap phase, lock identity, and timing variables; inherited by a suite,
+# they change what the scripts under test do without changing any test. Proven
+# through the observable consequence rather than the library's source: an
+# ambient FM_BOOTSTRAP_NETWORK=only silently drops fm-bootstrap.sh's entire
+# local half, so its legacy PR-check migration sweep never runs.
+test_shared_lib_neutralizes_ambient_session_env() {
+  local tmp probe leaked scrubbed
+  tmp=$(mktemp -d)
+  probe="$tmp/probe.sh"
+  cat > "$probe" <<SH
+#!/usr/bin/env bash
+set -u
+. "$ROOT/tests/lib.sh"
+printf 'network=[%s] lock=[%s] timing=[%s] detect=[%s]\\n' \\
+  "\${FM_BOOTSTRAP_NETWORK:-}" "\${FM_BOOTSTRAP_NETWORK_LOCK_PID:-}" \\
+  "\${FM_TIMING_LOG:-}" "\${FM_BOOTSTRAP_DETECT_ONLY:-}"
+SH
+  chmod +x "$probe"
+
+  # Same probe, twice: once with a hostile ambient environment, once clean. The
+  # first proves the scrub actually fires, the second that it invents nothing.
+  leaked=$(FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_NETWORK_LOCK_PID=424242 \
+    FM_TIMING_LOG="$tmp/timing.log" FM_BOOTSTRAP_DETECT_ONLY=1 "$probe")
+  scrubbed=$(env -u FM_BOOTSTRAP_NETWORK -u FM_BOOTSTRAP_NETWORK_LOCK_PID \
+    -u FM_TIMING_LOG -u FM_BOOTSTRAP_DETECT_ONLY "$probe")
+  rm -rf "$tmp"
+
+  [ "$leaked" = 'network=[] lock=[] timing=[] detect=[]' ] \
+    || fail "shared test library let session orchestration env through: $leaked"
+  [ "$scrubbed" = "$leaked" ] \
+    || fail "shared test library changed a clean environment: $scrubbed"
+  pass "shared test library neutralizes the launching session's orchestration env"
+}
+
+test_shared_lib_neutralizes_ambient_session_env
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
