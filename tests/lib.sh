@@ -293,9 +293,17 @@ assert_not_contains() {
 }
 
 # expect_code <expected> <actual> <label>
+# When the caller has a local `out` holding the command's captured output,
+# it is dynamically visible here and gets appended on failure instead of
+# discarded, matching assert_contains/assert_not_contains's "--- output ---" style.
 expect_code() {
   local expected=$1 actual=$2 label=$3
-  [ "$actual" = "$expected" ] || fail "$label: expected exit $expected, got $actual"
+  [ "$actual" = "$expected" ] && return 0
+  if [ -n "${out:-}" ]; then
+    fail "$label: expected exit $expected, got $actual"$'\n'"--- output ---"$'\n'"$out"
+  else
+    fail "$label: expected exit $expected, got $actual"
+  fi
 }
 
 # assert_grep <pattern> <file> <msg>: fixed-string grep must match in <file>.
