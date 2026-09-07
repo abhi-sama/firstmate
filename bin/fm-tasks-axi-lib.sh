@@ -41,10 +41,11 @@
 # exists on the same machine. fm_tasks_axi_bin resolves the executable once
 # per process into FM_TASKS_AXI_BIN, tried in this order: an inherited
 # FM_TASKS_AXI_BIN override, PATH, the current nvm node version's bin, then the
-# npm global prefix bin. Every probe below calls fm_tasks_axi_bin instead of
-# invoking tasks-axi bare; bin/fm-decision-hold.sh does the same in its own
-# tasks_axi() and require_tasks_axi() after sourcing this file, which is the
-# chokepoint that previously left crew self-filed decision holds unreachable.
+# npm global prefix bin. Every probe below runs it through fm_tasks_axi_run
+# instead of invoking tasks-axi bare; bin/fm-decision-hold.sh does the same in
+# its own tasks_axi() and require_tasks_axi() after sourcing this file, which
+# is the chokepoint that previously left crew self-filed decision holds
+# unreachable.
 
 FM_TASKS_AXI_MIN=0.2.4
 
@@ -121,10 +122,23 @@ fm_tasks_axi_bin_search_summary() {
   printf 'searched PATH, %s/versions/node/*/bin, and the npm global prefix bin\n' "${NVM_DIR:-$HOME/.nvm}"
 }
 
-fm_tasks_axi_version_parts() {
-  local output bin
+# Runs the resolved tasks-axi binary with its own directory prepended to PATH.
+# tasks-axi is a `#!/usr/bin/env node` script: finding its path is not enough
+# to run it unless something on PATH already provides node, which is not
+# guaranteed for a crew shell. The nvm and npm-global fallback layouts always
+# place node right next to tasks-axi in the same bin directory, so prepending
+# that directory makes the resolved binary runnable on its own. Every caller
+# that execs the resolved binary goes through here instead of "$bin" bare.
+fm_tasks_axi_run() {
+  local bin dir
   bin=$(fm_tasks_axi_bin) || return 1
-  output=$("$bin" --version 2>/dev/null) || return 1
+  dir=${bin%/*}
+  PATH="$dir:$PATH" "$bin" "$@"
+}
+
+fm_tasks_axi_version_parts() {
+  local output
+  output=$(fm_tasks_axi_run --version 2>/dev/null) || return 1
   printf '%s\n' "$output" |
     sed -n 's/.*\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2 \3/p' |
     head -1
@@ -164,16 +178,14 @@ fm_tasks_axi_compatible_probe() {
 }
 
 fm_tasks_axi_update_has_archive_body() {
-  local output bin
-  bin=$(fm_tasks_axi_bin) || return 1
-  output=$("$bin" update --help 2>&1) || return 1
+  local output
+  output=$(fm_tasks_axi_run update --help 2>&1) || return 1
   printf '%s\n' "$output" | grep -F -- '--archive-body' >/dev/null
 }
 
 fm_tasks_axi_mv_has_multi_id() {
-  local output bin
-  bin=$(fm_tasks_axi_bin) || return 1
-  output=$("$bin" mv --help 2>&1) || return 1
+  local output
+  output=$(fm_tasks_axi_run mv --help 2>&1) || return 1
   printf '%s\n' "$output" | grep -F -- '[<id>...]' >/dev/null
 }
 

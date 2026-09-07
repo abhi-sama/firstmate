@@ -22,16 +22,18 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-tasks-axi-resolve)
 
 command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
+command -v node >/dev/null 2>&1 || { echo "skip: node not found"; exit 0; }
 REAL_TASKS_AXI=$(command -v tasks-axi)
 REAL_TASKS_AXI_DIR=$(dirname "$REAL_TASKS_AXI")
+REAL_NODE=$(command -v node)
 REAL_NPM_DIR=
 if command -v npm >/dev/null 2>&1; then
   REAL_NPM_DIR=$(dirname "$(command -v npm)")
 fi
 
 # strip_path <dir> [<dir>...]: echo $PATH with the given directories removed,
-# so tasks-axi (and, when given, npm) genuinely cannot be found on PATH -
-# the exact shape of a crew shell spawned into a task worktree.
+# so tasks-axi (and, when given, npm) genuinely cannot be found on PATH - the
+# exact shape of a crew shell spawned into a task worktree.
 strip_path() {
   local removed=" $* " dir out='' old_ifs=$IFS
   IFS=:
@@ -45,19 +47,38 @@ strip_path() {
   printf '%s\n' "$out"
 }
 
-STRIPPED_PATH=$(strip_path "$REAL_TASKS_AXI_DIR" "$REAL_NPM_DIR")
+# every_node_dir: every directory on the CURRENT PATH holding a node
+# executable, not just the first `command -v node` hit - which node comes
+# first depends on invocation order, and stopping at one can silently leave a
+# second, unstripped node install in place to mask exactly the bug this suite
+# exists to catch (tasks-axi's `#!/usr/bin/env node` shebang needing node
+# reachable on its own, independent of tasks-axi's own resolution).
+every_node_dir() {
+  local dir out='' old_ifs=$IFS
+  IFS=:
+  for dir in $PATH; do
+    [ -x "$dir/node" ] || continue
+    case " $out " in *" $dir "*) continue ;; esac
+    out="${out:+$out }$dir"
+  done
+  IFS=$old_ifs
+  printf '%s\n' "$out"
+}
 
-# make_nvm_fallback <fake-home>: populate <fake-home>/.nvm with a shim that
-# execs the real tasks-axi, at the layout fm_tasks_axi_nvm_fallback scans.
+STRIPPED_PATH=$(strip_path "$REAL_TASKS_AXI_DIR" "$REAL_NPM_DIR" "$(every_node_dir)")
+
+# make_nvm_fallback <fake-home>: populate <fake-home>/.nvm with node and
+# tasks-axi side by side, at the layout fm_tasks_axi_nvm_fallback scans. Real
+# nvm keeps every version's node and its global-installed CLI shims in the
+# same bin directory, and tasks-axi's `#!/usr/bin/env node` shebang depends on
+# that: resolving tasks-axi's path is not enough to run it unless node is
+# reachable too, so the fixture must carry both, not tasks-axi alone.
 make_nvm_fallback() {
   local fake_home=$1 shim_dir
   shim_dir="$fake_home/.nvm/versions/node/v99.99.99/bin"
   mkdir -p "$shim_dir"
-  cat > "$shim_dir/tasks-axi" <<EOF
-#!/usr/bin/env bash
-exec "$REAL_TASKS_AXI" "\$@"
-EOF
-  chmod +x "$shim_dir/tasks-axi"
+  ln -s "$REAL_NODE" "$shim_dir/node"
+  ln -s "$REAL_TASKS_AXI" "$shim_dir/tasks-axi"
 }
 
 test_bare_command_fails_without_fallback_present() {

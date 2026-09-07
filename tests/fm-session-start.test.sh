@@ -39,6 +39,12 @@ set -u
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-session-start-tests)
+# A deliberately nonexistent NVM_DIR: fm-tasks-axi-lib.sh's nvm fallback scan
+# reads ${NVM_DIR:-$HOME/.nvm}, and these tests never override the real $HOME,
+# so without this every run_*_session_start call would leak the operator's
+# own real nvm-installed tasks-axi into tests that mean to simulate a machine
+# with no compatible tasks-axi anywhere.
+SESSION_START_NVM_DIR="$TMP_ROOT/no-such-nvm"
 SESSION_START_TEST_HARNESS_PID=$$
 SESSION_START_SECOND_MATE_ID="fmtest-sm-${TMP_ROOT##*.}"
 SESSION_START_SECOND_MATE_TMP="/tmp/fm-$SESSION_START_SECOND_MATE_ID"
@@ -513,11 +519,11 @@ run_session_start() {
   local home=$1 root=$2 path=$3 pi_harness=${4:-}
   if [ -n "$pi_harness" ]; then
     env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
-      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" NVM_DIR="$SESSION_START_NVM_DIR" \
       "$SESSION_START"
   else
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" NVM_DIR="$SESSION_START_NVM_DIR" \
       "$SESSION_START"
   fi
 }
@@ -527,7 +533,7 @@ run_pi_session_start() {  # <home> <root> <path> [fm-session-start args...]
   shift 3
   env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS=pi \
     FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
-    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" NVM_DIR="$SESSION_START_NVM_DIR" \
     "$SESSION_START" "$@"
 }
 
@@ -536,7 +542,7 @@ run_named_harness_session_start() {  # <harness> <home> <root> <path> [fm-sessio
   shift 4
   env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     FM_FAKE_HARNESS="$harness" FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
-    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" NVM_DIR="$SESSION_START_NVM_DIR" \
     "$SESSION_START" "$@"
 }
 
