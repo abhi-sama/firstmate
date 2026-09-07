@@ -110,12 +110,13 @@ hold_id() {  # <origin-id> <decision-key>
 }
 
 tasks_axi() {
-  (cd "$FM_HOME" && tasks-axi "$@")
+  fm_tasks_axi_bin >/dev/null || fail "compatible tasks-axi is required ($(fm_tasks_axi_bin_search_summary))"
+  (cd "$FM_HOME" && fm_tasks_axi_run "$@")
 }
 
 require_tasks_axi() {
-  fm_tasks_axi_compatible || fail "compatible tasks-axi is required"
-  tasks-axi hold --help 2>&1 | grep -F -- '--kind captain' >/dev/null \
+  fm_tasks_axi_compatible || fail "compatible tasks-axi is required ($(fm_tasks_axi_bin_search_summary))"
+  fm_tasks_axi_run hold --help 2>&1 | grep -F -- '--kind captain' >/dev/null \
     || fail "tasks-axi does not expose the captain-hold contract"
 }
 

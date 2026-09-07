@@ -33,6 +33,19 @@
 #     probe runs normally.
 # Both layers are bounded by process lifetime, so a tasks-axi install or upgrade
 # is picked up by the next process rather than being cached to disk.
+#
+# BINARY RESOLUTION. A primary firstmate session normally inherits tasks-axi on
+# PATH from the nvm-initialised login shell it started from. A crew or scout
+# shell spawned into a task worktree does not re-establish that PATH, so a
+# bare `tasks-axi` invocation fails there even when a compatible install
+# exists on the same machine. fm_tasks_axi_bin resolves the executable once
+# per process into FM_TASKS_AXI_BIN, tried in this order: an inherited
+# FM_TASKS_AXI_BIN override, PATH, the current nvm node version's bin, then the
+# npm global prefix bin. Every probe below runs it through fm_tasks_axi_run
+# instead of invoking tasks-axi bare; bin/fm-decision-hold.sh does the same in
+# its own tasks_axi() and require_tasks_axi() after sourcing this file, which
+# is the chokepoint that previously left crew self-filed decision holds
+# unreachable.
 
 FM_TASKS_AXI_MIN=0.2.4
 
@@ -43,10 +56,89 @@ case "$FM_TASKS_AXI_COMPATIBLE_MEMO" in
   *) FM_TASKS_AXI_COMPATIBLE_MEMO= ;;
 esac
 
+FM_TASKS_AXI_BIN=${FM_TASKS_AXI_BIN:-}
+FM_TASKS_AXI_BIN_RESOLVED=0
+
+fm_tasks_axi_nvm_fallback() {
+  local nvm_dir=${NVM_DIR:-$HOME/.nvm} dir base version major minor patch extra
+  local best='' best_major=-1 best_minor=-1 best_patch=-1
+  for dir in "$nvm_dir"/versions/node/*/bin; do
+    [ -d "$dir" ] && [ ! -L "$dir" ] && [ -x "$dir/tasks-axi" ] || continue
+    base=${dir%/bin}
+    version=${base##*/}
+    version=${version#v}
+    IFS=. read -r major minor patch extra <<< "$version"
+    case "$major:$minor:$patch:$extra" in *[!0-9:]*) continue ;; esac
+    [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || continue
+    if [ "$major" -gt "$best_major" ] ||
+      { [ "$major" -eq "$best_major" ] && [ "$minor" -gt "$best_minor" ]; } ||
+      { [ "$major" -eq "$best_major" ] && [ "$minor" -eq "$best_minor" ] && [ "$patch" -gt "$best_patch" ]; }; then
+      best=$dir
+      best_major=$major
+      best_minor=$minor
+      best_patch=$patch
+    fi
+  done
+  [ -n "$best" ] || return 1
+  printf '%s/tasks-axi\n' "$best"
+}
+
+fm_tasks_axi_npm_global_fallback() {
+  local prefix
+  command -v npm >/dev/null 2>&1 || return 1
+  prefix=$(npm prefix -g 2>/dev/null) || return 1
+  [ -n "$prefix" ] || return 1
+  if [ -x "$prefix/bin/tasks-axi" ]; then
+    printf '%s/bin/tasks-axi\n' "$prefix"
+  elif [ -x "$prefix/tasks-axi" ]; then
+    printf '%s/tasks-axi\n' "$prefix"
+  else
+    return 1
+  fi
+}
+
+# Resolves and memoises the tasks-axi binary for this process; prints the
+# absolute path and returns 0, or returns 1 if nothing was found anywhere in
+# the search order. A candidate only has to exist to be picked here: whether
+# it is new enough stays the separate concern fm_tasks_axi_compatible_probe
+# checks against whatever fm_tasks_axi_bin resolved.
+fm_tasks_axi_bin() {
+  local candidate
+  if [ "$FM_TASKS_AXI_BIN_RESOLVED" != 1 ]; then
+    candidate=$FM_TASKS_AXI_BIN
+    [ -n "$candidate" ] && [ -x "$candidate" ] || candidate=$(command -v tasks-axi 2>/dev/null || true)
+    [ -n "$candidate" ] || candidate=$(fm_tasks_axi_nvm_fallback 2>/dev/null || true)
+    [ -n "$candidate" ] || candidate=$(fm_tasks_axi_npm_global_fallback 2>/dev/null || true)
+    FM_TASKS_AXI_BIN=$candidate
+    FM_TASKS_AXI_BIN_RESOLVED=1
+  fi
+  [ -n "$FM_TASKS_AXI_BIN" ] || return 1
+  printf '%s\n' "$FM_TASKS_AXI_BIN"
+}
+
+# One-line description of where fm_tasks_axi_bin looked, for callers to fold
+# into their own failure message when resolution finds nothing at all.
+fm_tasks_axi_bin_search_summary() {
+  printf 'searched PATH, %s/versions/node/*/bin, and the npm global prefix bin\n' "${NVM_DIR:-$HOME/.nvm}"
+}
+
+# Runs the resolved tasks-axi binary with its own directory prepended to PATH.
+# tasks-axi is a `#!/usr/bin/env node` script: finding its path is not enough
+# to run it unless something on PATH already provides node, which is not
+# guaranteed for a crew shell. The nvm and npm-global fallback layouts always
+# place node right next to tasks-axi in the same bin directory, so prepending
+# that directory makes the resolved binary runnable on its own. Every caller
+# that execs the resolved binary goes through here instead of "$bin" bare.
+fm_tasks_axi_run() {
+  local bin dir
+  bin=$(fm_tasks_axi_bin) || return 1
+  dir=${bin%/*}
+  PATH="$dir:$PATH" "$bin" "$@"
+}
+
 fm_tasks_axi_version_parts() {
   local output
-  command -v tasks-axi >/dev/null 2>&1 || return 1
-  output=$(tasks-axi --version 2>/dev/null) || return 1
+  output=$(fm_tasks_axi_run --version 2>/dev/null) || return 1
   printf '%s\n' "$output" |
     sed -n 's/.*\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2 \3/p' |
     head -1
@@ -87,15 +179,13 @@ fm_tasks_axi_compatible_probe() {
 
 fm_tasks_axi_update_has_archive_body() {
   local output
-  command -v tasks-axi >/dev/null 2>&1 || return 1
-  output=$(tasks-axi update --help 2>&1) || return 1
+  output=$(fm_tasks_axi_run update --help 2>&1) || return 1
   printf '%s\n' "$output" | grep -F -- '--archive-body' >/dev/null
 }
 
 fm_tasks_axi_mv_has_multi_id() {
   local output
-  command -v tasks-axi >/dev/null 2>&1 || return 1
-  output=$(tasks-axi mv --help 2>&1) || return 1
+  output=$(fm_tasks_axi_run mv --help 2>&1) || return 1
   printf '%s\n' "$output" | grep -F -- '[<id>...]' >/dev/null
 }
 
