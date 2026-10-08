@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 # Shared durable wake queue and portable lock helpers.
+#
+# Queue record format (state/.wake-queue), one wake per line:
+#   epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
+# Records stay queued until the handling turn runs the generation-bound
+# acknowledgement the drain prints. A drain-time historical status annotation
+# (fm_wake_print_annotations) is supplemental context only: it never replaces
+# the raw record or current-state reconciliation.
 
 FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"

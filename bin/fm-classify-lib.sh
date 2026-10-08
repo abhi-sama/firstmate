@@ -493,6 +493,8 @@ EOF
 # drop an open decision - because a losing writer's offset can only ever be
 # equal to or behind an already-recorded byte position, and the next call
 # re-derives from whatever offset actually landed on disk.
+# The cursor is a pure cache: deleting it is safe and only forces one full
+# re-fold of the status log on the next call. Teardown removes it.
 _fm_open_decisions_cursor_path() {  # <status-file>
   local f=$1 dir base
   dir=$(dirname "$f")
